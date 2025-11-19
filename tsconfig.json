@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    // ---- Layout de archivos ----
+    "rootDir": "./src",
+    "outDir": "./dist",
+
+    // ---- Módulos / entorno Node ----
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+
+    // Para que los imports tipo ES funcionen bien:
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+
+    // ---- Tipos ----
+    "types": ["node"],
+
+    // ---- Opciones de tipo ----
+    "strict": true,
+    "skipLibCheck": true,
+
+    // ---- Otros ----
+    "sourceMap": true
+  },
+  "include": ["src"]
+}
