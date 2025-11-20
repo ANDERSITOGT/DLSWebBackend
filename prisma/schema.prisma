@@ -1,15 +1,291 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-generator client {
-  provider = "prisma-client-js"
+model auditoria {
+  id        String    @id @default(dbgenerated("gen_random_uuid()"))
+  usuarioid String?
+  entidad   String
+  entidadid String
+  accion    String
+  payload   Json?
+  fecha     DateTime? @default(now()) @db.Timestamp(6)
+  ip        String?
+  useragent String?
+  usuario   usuario?  @relation(fields: [usuarioid], references: [id], onDelete: NoAction, onUpdate: NoAction)
 }
 
-model Producto {
-  id     Int    @id @default(autoincrement())
-  codigo String @unique
-  nombre String
-  unidad String  // "kg", "lt", "und"
+model bodega {
+  id                                          String      @id @default(dbgenerated("gen_random_uuid()"))
+  nombre                                      String      @unique
+  direccion                                   String?
+  createdat                                   DateTime?   @default(now()) @db.Timestamp(6)
+  documento_documento_bodegadestinoidTobodega documento[] @relation("documento_bodegadestinoidTobodega")
+  documento_documento_bodegaorigenidTobodega  documento[] @relation("documento_bodegaorigenidTobodega")
+  solicitud                                   solicitud[]
+  ubicacion                                   ubicacion[]
+}
+
+model categoria {
+  id        String     @id @default(dbgenerated("gen_random_uuid()"))
+  nombre    String     @unique
+  createdat DateTime?  @default(now()) @db.Timestamp(6)
+  producto  producto[]
+}
+
+model comprobante_fiscal {
+  id              String    @id @default(dbgenerated("gen_random_uuid()"))
+  documentoid     String    @unique
+  tipocomprobante String
+  nitemisor       String
+  numero          String
+  serie           String?
+  uuid            String?
+  fechaemision    DateTime  @db.Timestamp(6)
+  notas           String?
+  createdat       DateTime? @default(now()) @db.Timestamp(6)
+  documento       documento @relation(fields: [documentoid], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model consecutivo {
+  id        String         @id @default(dbgenerated("gen_random_uuid()"))
+  tipo      tipo_documento
+  anio      Int
+  prefijo   String?
+  ultimo    Int?           @default(0)
+  createdat DateTime?      @default(now()) @db.Timestamp(6)
+
+  @@unique([tipo, anio])
+}
+
+model cultivo {
+  id        String    @id @default(dbgenerated("gen_random_uuid()"))
+  nombre    String
+  variedad  String?
+  createdat DateTime? @default(now()) @db.Timestamp(6)
+  lote      lote[]
+
+  @@unique([nombre, variedad])
+}
+
+model documento {
+  id                                       String              @id @default(dbgenerated("gen_random_uuid()"))
+  tipo                                     tipo_documento
+  estado                                   estado_documento?   @default(BORRADOR)
+  fecha                                    DateTime?           @default(now()) @db.Timestamp(6)
+  proveedorid                              String?
+  bodegaorigenid                           String?
+  bodegadestinoid                          String?
+  solicitanteid                            String?
+  creadorid                                String
+  consecutivo                              String?
+  observacion                              String?
+  createdat                                DateTime?           @default(now()) @db.Timestamp(6)
+  comprobante_fiscal                       comprobante_fiscal?
+  bodega_documento_bodegadestinoidTobodega bodega?             @relation("documento_bodegadestinoidTobodega", fields: [bodegadestinoid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bodega_documento_bodegaorigenidTobodega  bodega?             @relation("documento_bodegaorigenidTobodega", fields: [bodegaorigenid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  usuario_documento_creadoridTousuario     usuario             @relation("documento_creadoridTousuario", fields: [creadorid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  proveedor                                proveedor?          @relation(fields: [proveedorid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  usuario_documento_solicitanteidTousuario usuario?            @relation("documento_solicitanteidTousuario", fields: [solicitanteid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  documento_item                           documento_item[]
+  solicitud                                solicitud?
+
+  @@index([tipo, fecha], map: "idx_documento_tipo_fecha")
+}
+
+model documento_item {
+  id          String     @id @default(dbgenerated("gen_random_uuid()"))
+  documentoid String
+  productoid  String
+  unidadid    String
+  ubicacionid String?
+  loteid      String?
+  cantidad    Decimal    @db.Decimal(14, 3)
+  costounit   Decimal?   @db.Decimal(12, 4)
+  precioref   Decimal?   @db.Decimal(12, 2)
+  notas       String?
+  createdat   DateTime?  @default(now()) @db.Timestamp(6)
+  documento   documento  @relation(fields: [documentoid], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  lote        lote?      @relation(fields: [loteid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  producto    producto   @relation(fields: [productoid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  ubicacion   ubicacion? @relation(fields: [ubicacionid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  unidad      unidad     @relation(fields: [unidadid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([loteid], map: "idx_documento_item_lote")
+  @@index([productoid], map: "idx_documento_item_producto")
+}
+
+model finca {
+  id        String    @id @default(dbgenerated("gen_random_uuid()"))
+  nombre    String    @unique
+  ubicacion String?
+  createdat DateTime? @default(now()) @db.Timestamp(6)
+  lote      lote[]
+}
+
+model lote {
+  id                 String           @id @default(dbgenerated("gen_random_uuid()"))
+  fincaid            String
+  cultivoid          String
+  codigo             String
+  areamanzanas       Decimal?         @db.Decimal(10, 4)
+  areametroslineales Decimal?         @db.Decimal(12, 2)
+  areahectareas      Decimal?         @db.Decimal(10, 4)
+  fechasiembra       DateTime?        @db.Timestamp(6)
+  fechacierre        DateTime?        @db.Timestamp(6)
+  estado             estado_lote?     @default(ABIERTO)
+  descripcion        String?
+  createdat          DateTime?        @default(now()) @db.Timestamp(6)
+  documento_item     documento_item[]
+  cultivo            cultivo          @relation(fields: [cultivoid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  finca              finca            @relation(fields: [fincaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  solicitud_item     solicitud_item[]
+
+  @@unique([fincaid, codigo])
+}
+
+model producto {
+  id                String           @id @default(dbgenerated("gen_random_uuid()"))
+  codigo            String           @unique
+  codigoalt         String?
+  nombre            String
+  ingredienteactivo String?
+  categoriaid       String
+  unidadid          String
+  activo            Boolean?         @default(true)
+  precioref         Decimal?         @db.Decimal(12, 2)
+  createdat         DateTime?        @default(now()) @db.Timestamp(6)
+  documento_item    documento_item[]
+  categoria         categoria        @relation(fields: [categoriaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  unidad            unidad           @relation(fields: [unidadid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  solicitud_item    solicitud_item[]
+
+  @@index([nombre], map: "idx_producto_nombre")
+}
+
+model proveedor {
+  id                 String               @id @default(dbgenerated("gen_random_uuid()"))
+  nombre             String               @unique
+  nit                String?
+  notas              String?
+  createdat          DateTime?            @default(now()) @db.Timestamp(6)
+  documento          documento[]
+  proveedor_contacto proveedor_contacto[]
+}
+
+model proveedor_contacto {
+  id          String    @id @default(dbgenerated("gen_random_uuid()"))
+  proveedorid String
+  nombre      String
+  telefono    String?
+  email       String?
+  puesto      String?
+  notas       String?
+  createdat   DateTime? @default(now()) @db.Timestamp(6)
+  proveedor   proveedor @relation(fields: [proveedorid], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model solicitud {
+  id                                       String            @id @default(dbgenerated("gen_random_uuid()"))
+  fecha                                    DateTime?         @default(now()) @db.Timestamp(6)
+  estado                                   estado_solicitud? @default(PENDIENTE)
+  solicitanteid                            String
+  bodegaid                                 String?
+  aprobadorid                              String?
+  documentosalidaid                        String?           @unique
+  createdat                                DateTime?         @default(now()) @db.Timestamp(6)
+  usuario_solicitud_aprobadoridTousuario   usuario?          @relation("solicitud_aprobadoridTousuario", fields: [aprobadorid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bodega                                   bodega?           @relation(fields: [bodegaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  documento                                documento?        @relation(fields: [documentosalidaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  usuario_solicitud_solicitanteidTousuario usuario           @relation("solicitud_solicitanteidTousuario", fields: [solicitanteid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  solicitud_item                           solicitud_item[]
+}
+
+model solicitud_item {
+  id          String    @id @default(dbgenerated("gen_random_uuid()"))
+  solicitudid String
+  productoid  String
+  unidadid    String
+  loteid      String?
+  cantidad    Decimal   @db.Decimal(14, 3)
+  notas       String?
+  createdat   DateTime? @default(now()) @db.Timestamp(6)
+  lote        lote?     @relation(fields: [loteid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  producto    producto  @relation(fields: [productoid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  solicitud   solicitud @relation(fields: [solicitudid], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  unidad      unidad    @relation(fields: [unidadid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model ubicacion {
+  id             String           @id @default(dbgenerated("gen_random_uuid()"))
+  codigo         String
+  descripcion    String?
+  bodegaid       String
+  createdat      DateTime?        @default(now()) @db.Timestamp(6)
+  documento_item documento_item[]
+  bodega         bodega           @relation(fields: [bodegaid], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([bodegaid, codigo])
+}
+
+model unidad {
+  id             String           @id @default(dbgenerated("gen_random_uuid()"))
+  nombre         String
+  abreviatura    String           @unique
+  createdat      DateTime?        @default(now()) @db.Timestamp(6)
+  documento_item documento_item[]
+  producto       producto[]
+  solicitud_item solicitud_item[]
+}
+
+model usuario {
+  id                                         String      @id @default(dbgenerated("gen_random_uuid()"))
+  email                                      String      @unique
+  nombre                                     String
+  rol                                        rol?        @default(VISOR)
+  activo                                     Boolean?    @default(true)
+  createdat                                  DateTime?   @default(now()) @db.Timestamp(6)
+  auditoria                                  auditoria[]
+  documento_documento_creadoridTousuario     documento[] @relation("documento_creadoridTousuario")
+  documento_documento_solicitanteidTousuario documento[] @relation("documento_solicitanteidTousuario")
+  solicitud_solicitud_aprobadoridTousuario   solicitud[] @relation("solicitud_aprobadoridTousuario")
+  solicitud_solicitud_solicitanteidTousuario solicitud[] @relation("solicitud_solicitanteidTousuario")
+}
+
+enum estado_documento {
+  BORRADOR
+  APROBADO
+  ANULADO
+}
+
+enum estado_lote {
+  ABIERTO
+  CERRADO
+}
+
+enum estado_solicitud {
+  PENDIENTE
+  APROBADA
+  RECHAZADA
+  ENTREGADA
+}
+
+enum rol {
+  ADMIN
+  BODEGUERO
+  SOLICITANTE
+  VISOR
+}
+
+enum tipo_documento {
+  INGRESO
+  SALIDA
+  TRANSFERENCIA
+  AJUSTE
+  DEVOLUCION
 }
