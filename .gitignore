@@ -1,27 +1,47 @@
+
 # Node
-node_modules/
+node_modules
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+dist
+build
 
 # TypeScript
-dist/
 *.tsbuildinfo
 
-# Env files (VERY IMPORTANT)
+# Env files
 .env
-.env.local
-.env.*.local
+.env.*
 
 # Prisma
 prisma/dev.db
-prisma/dev.db-journal
+prisma/migrations/
+.prisma/
+
+# Logs
+logs
+*.log
+*.log.*
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-logs
-*.log
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# React/Next
+.next/
+out/
+
+# Testing
+coverage/
+
+# Misc
+*.local
+*.sublime-project
+*.sublime-workspace
