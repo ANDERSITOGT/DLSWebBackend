@@ -4,6 +4,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import inicioRouter from "./routes/inicio";
+import inventarioRouter from "./routes/inventario";
+import categoriasRouter from "./routes/categorias";
 
 dotenv.config();
 
@@ -16,10 +18,12 @@ app.use(express.json());
 
 // Rutas
 app.use("/api/inicio", inicioRouter);
+app.use("/api/inventario", inventarioRouter);
+app.use("/api/categorias", categoriasRouter);
 
-app.get("/api/health", async (req, res) => {
+// Health check sencillo
+app.get("/api/health", async (_req, res) => {
   try {
-    // Aquí solo comprobamos que el server está arriba.
     res.json({ ok: true, db: "online" });
   } catch (error) {
     console.error("Error en /api/health:", error);
