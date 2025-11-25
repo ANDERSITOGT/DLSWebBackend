@@ -1,63 +1,38 @@
 // src/services/inicioService.ts
 import prisma from "../prisma";
 
-// ------------------------------
-// Tipos de respuesta (opcional, solo para ayudarte)
-// ------------------------------
-type SolicitudDashboardItem = {
-  id: string;
-  codigo: string;
-  cliente: string;
-  bodega: string;
-  productos: string; // "5 productos"
-  fecha: string;
-  estado: string | null;
-};
-
-type MovimientoDashboardItem = {
-  id: string;
-  codigo: string;
-  tipo: string;
-  productos: string; // "3 productos"
-  fecha: string;
-};
-
-type BodegueroDashboard = {
-  resumen: {
-    pendientes: number;
-    stockBajo: number;
-  };
-  solicitudesPorAtender: SolicitudDashboardItem[];
-  movimientosDelDia: MovimientoDashboardItem[];
-};
-
-// ------------------------------
-// Servicio de inicio
-// ------------------------------
 export const inicioService = {
-  // ==========================================
+  // =========================================================
   // DASHBOARD BODEGUERO
-  // ==========================================
-  async getBodegueroDashboard(): Promise<BodegueroDashboard> {
-    // 1) Total de solicitudes pendientes
+  // =========================================================
+  async getBodegueroDashboard() {
+    // ---------------- Resumen ----------------
     const pendientes = await prisma.solicitud.count({
-      where: { estado: "PENDIENTE" },
+      where: {
+        estado: "PENDIENTE",
+      },
     });
 
-    // 2) Productos con stock bajo
-    //    Por ahora NO tenemos tabla de existencias, así que solo contamos productos.
-    //    Más adelante, cuando definamos stock por bodega, aquí ponemos el filtro real.
-    const stockBajo = await prisma.producto.count();
+    // De momento no tenemos campo de stock real, usamos un valor fijo
+    // más adelante esto vendrá de una vista de existencias.
+    const stockBajo = 5;
 
-    // 3) Solicitudes recientes (para la tarjeta "Solicitudes por Atender")
-    const solicitudes = await prisma.solicitud.findMany({
+    // ---------------- Solicitudes por atender ----------------
+    const solicitudesPorAtenderRaw = await prisma.solicitud.findMany({
+      where: {
+        estado: {
+          in: ["PENDIENTE", "APROBADA"],
+        },
+      },
       orderBy: { fecha: "desc" },
       take: 5,
       select: {
         id: true,
         fecha: true,
         estado: true,
-        bodega: { select: { nombre: true } },
+        bodega: {
+          select: { nombre: true },
+        },
         usuario_solicitud_solicitanteidTousuario: {
           select: { nombre: true },
         },
@@ -67,35 +42,25 @@ export const inicioService = {
       },
     });
 
-    const solicitudesPorAtender: SolicitudDashboardItem[] = solicitudes.map(
-      (s) => {
-        const fechaStr = s.fecha
-          ? s.fecha.toISOString().split("T")[0]
-          : "";
+    const solicitudesPorAtender = solicitudesPorAtenderRaw.map((s) => ({
+      id: s.id,
+      codigo: s.id, // luego podremos usar el consecutivo del documento de salida
+      cliente: s.usuario_solicitud_solicitanteidTousuario?.nombre ?? "Sin nombre",
+      bodega: s.bodega?.nombre ?? "Sin bodega",
+      productos: `${s.solicitud_item.length} productos`,
+      fecha: s.fecha ? s.fecha.toISOString() : null,
+      estado: s.estado,
+    }));
 
-        return {
-          id: s.id,
-          // De momento usamos el UUID como "código".
-          // Más adelante podemos generar algo tipo "SOL-2025-0001".
-          codigo: s.id,
-          cliente:
-            s.usuario_solicitud_solicitanteidTousuario?.nombre ?? "—",
-          bodega: s.bodega?.nombre ?? "—",
-          productos: `${s.solicitud_item.length} productos`,
-          fecha: fechaStr,
-          estado: s.estado ?? null,
-        };
-      }
-    );
-
-    // 4) Movimientos del día (documentos de hoy: ingresos/salidas/transferencias)
+    // ---------------- Movimientos del día ----------------
     const hoy = new Date();
     hoy.setHours(0, 0, 0, 0);
 
-    const documentos = await prisma.documento.findMany({
+    const movimientosDelDiaRaw = await prisma.documento.findMany({
       where: {
-        fecha: {
-          gte: hoy,
+        fecha: { gte: hoy },
+        tipo: {
+          in: ["INGRESO", "SALIDA", "TRANSFERENCIA"],
         },
       },
       orderBy: { fecha: "desc" },
@@ -104,28 +69,19 @@ export const inicioService = {
         id: true,
         fecha: true,
         tipo: true,
-        consecutivo: true,
         documento_item: {
           select: { id: true },
         },
       },
     });
 
-    const movimientosDelDia: MovimientoDashboardItem[] = documentos.map(
-      (d) => {
-        const fechaStr = d.fecha
-          ? d.fecha.toISOString().replace("T", " ").slice(0, 16)
-          : "";
-
-        return {
-          id: d.id,
-          codigo: d.consecutivo ?? d.id,
-          tipo: d.tipo, // "INGRESO" | "SALIDA" | "TRANSFERENCIA" | etc
-          productos: `${d.documento_item.length} productos`,
-          fecha: fechaStr,
-        };
-      }
-    );
+    const movimientosDelDia = movimientosDelDiaRaw.map((m) => ({
+      id: m.id,
+      codigo: m.id,
+      tipo: m.tipo,
+      productos: `${m.documento_item.length} productos`,
+      fecha: m.fecha ? m.fecha.toISOString() : null,
+    }));
 
     return {
       resumen: {
@@ -137,25 +93,149 @@ export const inicioService = {
     };
   },
 
-  // ==========================================
-  // DASHBOARD SOLICITANTE (stub por ahora)
-  // ==========================================
+  // =========================================================
+  // DASHBOARD SOLICITANTE
+  // =========================================================
   async getSolicitanteDashboard() {
-    // Lo llenamos luego con consultas reales.
+    // TODO: más adelante tomar el solicitante de la sesión / token
+    // const solicitanteId = "...";
+
+    const hoy = new Date();
+
+    // Inicio de semana (lunes)
+    const inicioSemana = new Date(hoy);
+    const diff = (inicioSemana.getDay() + 6) % 7; // 0=domingo, queremos lunes
+    inicioSemana.setDate(inicioSemana.getDate() - diff);
+    inicioSemana.setHours(0, 0, 0, 0);
+
+    // ---------------- Resumen ----------------
+    const pendientes = await prisma.solicitud.count({
+      where: {
+        estado: "PENDIENTE",
+        // solicitanteid: solicitanteId,
+      },
+    });
+
+    const aprobadas = await prisma.solicitud.count({
+      where: {
+        estado: "APROBADA",
+        // solicitanteid: solicitanteId,
+      },
+    });
+
+    const estaSemana = await prisma.solicitud.count({
+      where: {
+        fecha: { gte: inicioSemana },
+        // solicitanteid: solicitanteId,
+      },
+    });
+
+    // ---------------- En proceso ----------------
+    const enProcesoRaw = await prisma.solicitud.findMany({
+      where: {
+        estado: { in: ["PENDIENTE", "APROBADA"] },
+        // solicitanteid: solicitanteId,
+      },
+      orderBy: { fecha: "desc" },
+      take: 5,
+      select: {
+        id: true,
+        fecha: true,
+        estado: true,
+        bodega: {
+          select: { nombre: true },
+        },
+        solicitud_item: {
+          select: { id: true },
+        },
+      },
+    });
+
+    const enProceso = enProcesoRaw.map((s) => ({
+      id: s.id,
+      codigo: s.id,
+      bodega: s.bodega?.nombre ?? "Sin bodega",
+      productos: `${s.solicitud_item.length} productos`,
+      fecha: s.fecha ? s.fecha.toISOString() : null,
+      estado: s.estado,
+    }));
+
+    // ---------------- Historial ----------------
+    const historialRaw = await prisma.solicitud.findMany({
+      where: {
+        estado: { in: ["ENTREGADA", "RECHAZADA"] },
+        // solicitanteid: solicitanteId,
+      },
+      orderBy: { fecha: "desc" },
+      take: 5,
+      select: {
+        id: true,
+        fecha: true,
+        estado: true,
+        bodega: {
+          select: { nombre: true },
+        },
+        solicitud_item: {
+          select: { id: true },
+        },
+      },
+    });
+
+    const historial = historialRaw.map((s) => ({
+      id: s.id,
+      codigo: s.id,
+      bodega: s.bodega?.nombre ?? "Sin bodega",
+      productos: `${s.solicitud_item.length} productos`,
+      fecha: s.fecha ? s.fecha.toISOString() : null,
+      estado: s.estado,
+    }));
+
     return {
-      mensaje:
-        "Dashboard de SOLICITANTE aún no está implementado con datos reales.",
+      resumen: {
+        pendientes,
+        aprobadas,
+        estaSemana,
+      },
+      enProceso,
+      historial,
     };
   },
 
-  // ==========================================
-  // DASHBOARD ADMIN (stub por ahora)
-  // ==========================================
+  // =========================================================
+  // (Opcional) DASHBOARD ADMIN
+  // Por ahora solo devolvemos algunos contadores básicos.
+  // Lo usaremos más adelante cuando conectemos el inicio de ADMIN.
+  // =========================================================
   async getAdminDashboard() {
-    // Igual, luego sacamos info real de documento, producto, etc.
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+
+    const movimientosHoy = await prisma.documento.count({
+      where: {
+        fecha: { gte: hoy },
+      },
+    });
+
+    const stockBajo = 5; // placeholder
+
+    const solicitudesActivas = await prisma.solicitud.count({
+      where: {
+        estado: {
+          in: ["PENDIENTE", "APROBADA"],
+        },
+      },
+    });
+
+    // Más adelante esto vendrá de un cálculo real de inventario
+    const valorInventarioEstimado = 2500000; // Q2.5M
+
     return {
-      mensaje:
-        "Dashboard de ADMIN aún no está implementado con datos reales.",
+      resumen: {
+        movimientosHoy,
+        stockBajo,
+        solicitudes: solicitudesActivas,
+        valorInventario: valorInventarioEstimado,
+      },
     };
   },
 };

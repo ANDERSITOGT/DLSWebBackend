@@ -1,9 +1,10 @@
+// src/routes/inicio.ts
 import { Router } from "express";
 import { inicioService } from "../services/inicioService";
 
-export const inicioRouter = Router();
+const router = Router();
 
-inicioRouter.get("/bodeguero", async (req, res) => {
+router.get("/bodeguero", async (req, res) => {
   try {
     const data = await inicioService.getBodegueroDashboard();
     res.json(data);
@@ -13,12 +14,19 @@ inicioRouter.get("/bodeguero", async (req, res) => {
   }
 });
 
-inicioRouter.get("/solicitante", async (req, res) => {
-  const data = await inicioService.getSolicitanteDashboard();
-  res.json(data);
+router.get("/solicitante", async (req, res) => {
+  try {
+    const data = await inicioService.getSolicitanteDashboard();
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error al obtener dashboard solicitante" });
+  }
 });
 
-inicioRouter.get("/admin", async (req, res) => {
-  const data = await inicioService.getAdminDashboard();
-  res.json(data);
+// si tienes admin:
+router.get("/admin", async (req, res) => {
+  // ...
 });
+
+export default router;
