@@ -1,11 +1,51 @@
 // src/services/movimientosService.ts
 import prisma from "../prisma";
+import PDFDocument from "pdfkit";
+
+// =============================
+// Helper para construir PDFs
+// =============================
+async function buildPDF(
+  build: (doc: any) => void
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 40,
+    });
+
+    const chunks: Buffer[] = [];
+
+    doc.on("data", (chunk: any) => {
+      chunks.push(chunk as Buffer);
+    });
+
+    doc.on("end", () => {
+      resolve(Buffer.concat(chunks));
+    });
+
+    doc.on("error", (err: any) => {
+      reject(err);
+    });
+
+    // El contenido real del PDF
+    build(doc);
+
+    doc.end();
+  });
+}
 
 // =============================
 // Tipos DTO para el frontend
 // =============================
 
-export type MovimientoTipo = "INGRESO" | "SALIDA" | "TRANSFERENCIA" | "AJUSTE" | "DEVOLUCION";
+export type MovimientoTipo =
+  | "INGRESO"
+  | "SALIDA"
+  | "TRANSFERENCIA"
+  | "AJUSTE"
+  | "DEVOLUCION";
+
 export type MovimientoEstado = "BORRADOR" | "APROBADO" | "ANULADO";
 
 export type MovimientoResumenDTO = {
@@ -91,7 +131,6 @@ export const movimientosService = {
       take: 50,
       include: {
         proveedor: true,
-        // nombres reales que Prisma generó al introspectar
         bodega_documento_bodegaorigenidTobodega: true,
         bodega_documento_bodegadestinoidTobodega: true,
         documento_item: {
@@ -101,8 +140,10 @@ export const movimientosService = {
     });
 
     const data: MovimientoResumenDTO[] = documentos.map((d) => {
-      const origen = d.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
-      const destino = d.bodega_documento_bodegadestinoidTobodega?.nombre ?? null;
+      const origen =
+        d.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
+      const destino =
+        d.bodega_documento_bodegadestinoidTobodega?.nombre ?? null;
       const proveedor = d.proveedor?.nombre ?? null;
       const productosLabel = `${d.documento_item.length} productos`;
 
@@ -154,8 +195,10 @@ export const movimientosService = {
       throw new Error("Documento no encontrado");
     }
 
-    const origen = doc.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
-    const destino = doc.bodega_documento_bodegadestinoidTobodega?.nombre ?? null;
+    const origen =
+      doc.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
+    const destino =
+      doc.bodega_documento_bodegadestinoidTobodega?.nombre ?? null;
     const proveedor = doc.proveedor?.nombre ?? null;
 
     const solicitante =
@@ -163,24 +206,26 @@ export const movimientosService = {
     const creador =
       doc.usuario_documento_creadoridTousuario?.nombre ?? null;
 
-    const productos: ProductoEnMovimientoDTO[] = doc.documento_item.map((item) => {
-      const cantidadNum = Number(item.cantidad) || 0;
-      const unidad = item.unidad?.abreviatura ?? "";
-      const loteCodigo = item.lote?.codigo ?? null;
-      const loteId = item.lote?.id ?? null;
-      const fincaNombre = item.lote?.finca?.nombre ?? null;
+    const productos: ProductoEnMovimientoDTO[] = doc.documento_item.map(
+      (item) => {
+        const cantidadNum = Number(item.cantidad) || 0;
+        const unidad = item.unidad?.abreviatura ?? "";
+        const loteCodigo = item.lote?.codigo ?? null;
+        const loteId = item.lote?.id ?? null;
+        const fincaNombre = item.lote?.finca?.nombre ?? null;
 
-      return {
-        id: item.id,
-        productoNombre: item.producto?.nombre ?? "",
-        productoCodigo: item.producto?.codigo ?? "",
-        cantidad: `${cantidadNum} ${unidad}`.trim(),
-        unidad,
-        loteCodigo,
-        loteId,
-        fincaNombre,
-      };
-    });
+        return {
+          id: item.id,
+          productoNombre: item.producto?.nombre ?? "",
+          productoCodigo: item.producto?.codigo ?? "",
+          cantidad: `${cantidadNum} ${unidad}`.trim(),
+          unidad,
+          loteCodigo,
+          loteId,
+          fincaNombre,
+        };
+      }
+    );
 
     return {
       id: doc.id,
@@ -208,7 +253,7 @@ export const movimientosService = {
         cultivo: true,
       },
       orderBy: {
-        createdat: "desc", // campo real en BD
+        createdat: "desc",
       },
       take: 50,
     });
@@ -216,7 +261,6 @@ export const movimientosService = {
     const resultado: LoteResumenDTO[] = [];
 
     for (const lote of lotes) {
-      // campos reales: areamanzanas, areahectareas, areametroslineales
       let area = "-";
       if (lote.areamanzanas != null) {
         area = `${Number(lote.areamanzanas)} mz`;
@@ -229,10 +273,9 @@ export const movimientosService = {
       const estadoFront: EstadoLoteFront =
         lote.estado === "ABIERTO" ? "ACTIVO" : "INACTIVO";
 
-      // número de aplicaciones (documento_item con ese lote)
       const aplicacionesCount = await prisma.documento_item.count({
         where: {
-          loteid: lote.id, // campo real en BD
+          loteid: lote.id,
           documento: {
             tipo: "SALIDA",
           },
@@ -303,26 +346,28 @@ export const movimientosService = {
       take: 50,
     });
 
-    const aplicaciones: LoteAplicacionDTO[] = aplicacionesRaw.map((item) => {
-      const doc = item.documento;
-      const bodega =
-        doc?.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
+    const aplicaciones: LoteAplicacionDTO[] = aplicacionesRaw.map(
+      (item) => {
+        const doc = item.documento;
+        const bodega =
+          doc?.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
 
-      const cantidadNum = Number(item.cantidad) || 0;
-      const unidad = item.unidad?.abreviatura ?? "";
+        const cantidadNum = Number(item.cantidad) || 0;
+        const unidad = item.unidad?.abreviatura ?? "";
 
-      return {
-        id: item.id,
-        documentoId: doc?.id ?? "",
-        documentoCodigo: doc?.consecutivo ?? doc?.id ?? "",
-        tipo: (doc?.tipo ?? "SALIDA") as MovimientoTipo,
-        fecha: doc?.fecha ? doc.fecha.toISOString() : null,
-        bodega,
-        producto: item.producto?.nombre ?? "",
-        cantidad: `${cantidadNum} ${unidad}`.trim(),
-        unidad,
-      };
-    });
+        return {
+          id: item.id,
+          documentoId: doc?.id ?? "",
+          documentoCodigo: doc?.consecutivo ?? doc?.id ?? "",
+          tipo: (doc?.tipo ?? "SALIDA") as MovimientoTipo,
+          fecha: doc?.fecha ? doc.fecha.toISOString() : null,
+          bodega,
+          producto: item.producto?.nombre ?? "",
+          cantidad: `${cantidadNum} ${unidad}`.trim(),
+          unidad,
+        };
+      }
+    );
 
     const aplicacionesCount = aplicaciones.length;
 
@@ -339,6 +384,185 @@ export const movimientosService = {
     return {
       lote: loteFront,
       aplicaciones,
+    };
+  },
+
+  // ---------------------------------------
+  // EXPORTS en PDF
+  // ---------------------------------------
+
+  /**
+   * Exporta el listado de movimientos como PDF.
+   */
+  async exportListadoMovimientosPDF(): Promise<{
+    filename: string;
+    mime: string;
+    content: Buffer;
+  }> {
+    const movimientos = await this.getListadoMovimientos();
+
+    const buffer = await buildPDF((doc) => {
+      doc.fontSize(16).text("Listado de movimientos", {
+        align: "center",
+      });
+      doc.moveDown();
+
+      doc.fontSize(10);
+
+      movimientos.forEach((m) => {
+        doc
+          .font("Helvetica-Bold")
+          .text(`Documento: ${m.codigo}`, { continued: false });
+        doc
+          .font("Helvetica")
+          .text(`Tipo: ${m.tipo}   Estado: ${m.estado}`);
+        doc.text(
+          `Origen: ${m.origen ?? "-"}   Destino: ${
+            m.destino ?? "-"
+          }`
+        );
+        doc.text(`Proveedor: ${m.proveedor ?? "-"}`);
+        doc.text(`Productos: ${m.productos}`);
+        doc.text(`Fecha: ${m.fecha ?? "-"}`);
+        doc.moveDown(0.8);
+        doc
+          .moveTo(doc.page.margins.left, doc.y)
+          .lineTo(
+            doc.page.width - doc.page.margins.right,
+            doc.y
+          )
+          .strokeColor("#CCCCCC")
+          .lineWidth(0.5)
+          .stroke();
+        doc.moveDown(0.6);
+      });
+    });
+
+    return {
+      filename: "movimientos.pdf",
+      mime: "application/pdf",
+      content: buffer,
+    };
+  },
+
+  /**
+   * Exporta el detalle de un documento como PDF.
+   */
+  async exportMovimientoDetallePDF(id: string): Promise<{
+    filename: string;
+    mime: string;
+    content: Buffer;
+  }> {
+    const det = await this.getDetalleMovimiento(id);
+
+    const buffer = await buildPDF((doc) => {
+      doc.fontSize(16).text(`Documento ${det.codigo}`, {
+        align: "center",
+      });
+      doc.moveDown();
+
+      doc.fontSize(10);
+
+      doc.text(`Tipo: ${det.tipo}`);
+      doc.text(`Estado: ${det.estado}`);
+      doc.text(`Fecha: ${det.fecha ?? "-"}`);
+      doc.text(`Origen: ${det.origen ?? "-"}`);
+      doc.text(`Destino: ${det.destino ?? "-"}`);
+      doc.text(`Proveedor: ${det.proveedor ?? "-"}`);
+      doc.text(`Solicitante: ${det.solicitante ?? "-"}`);
+      doc.text(`Registrado por: ${det.creador ?? "-"}`);
+      if (det.observacion) {
+        doc.moveDown(0.5);
+        doc.text(`Observación: ${det.observacion}`);
+      }
+
+      doc.moveDown();
+      doc.fontSize(12).text("Productos", { underline: true });
+      doc.moveDown(0.5);
+      doc.fontSize(10);
+
+      det.productos.forEach((p) => {
+        doc
+          .font("Helvetica-Bold")
+          .text(p.productoNombre, { continued: false });
+        doc.font("Helvetica").text(
+          `Código: ${p.productoCodigo}   Cantidad: ${p.cantidad}`
+        );
+        doc.text(
+          `Lote: ${p.loteCodigo ?? "-"}   Finca: ${
+            p.fincaNombre ?? "-"
+          }`
+        );
+        doc.moveDown(0.6);
+      });
+    });
+
+    const safeCodigo = det.codigo.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+    return {
+      filename: `documento_${safeCodigo}.pdf`,
+      mime: "application/pdf",
+      content: buffer,
+    };
+  },
+
+  /**
+   * Exporta el historial de un lote como PDF.
+   */
+  async exportHistorialLotePDF(loteId: string): Promise<{
+    filename: string;
+    mime: string;
+    content: Buffer;
+  }> {
+    const detalle = await this.getDetalleLote(loteId);
+    const { lote, aplicaciones } = detalle;
+
+    const buffer = await buildPDF((doc) => {
+      doc
+        .fontSize(16)
+        .text(`Historial de lote ${lote.codigo}`, {
+          align: "center",
+        });
+      doc.moveDown();
+
+      doc.fontSize(10);
+      doc.text(`Finca: ${lote.finca}`);
+      doc.text(`Cultivo: ${lote.cultivo}`);
+      doc.text(`Área: ${lote.area}`);
+      doc.text(`Estado: ${lote.estado}`);
+      doc.text(
+        `Aplicaciones registradas: ${lote.aplicacionesCount}`
+      );
+
+      doc.moveDown();
+      doc
+        .fontSize(12)
+        .text("Historial de aplicaciones", { underline: true });
+      doc.moveDown(0.5);
+      doc.fontSize(10);
+
+      aplicaciones.forEach((ap) => {
+        doc
+          .font("Helvetica-Bold")
+          .text(`${ap.documentoCodigo} (${ap.tipo})`);
+        doc.font("Helvetica").text(
+          `Fecha: ${ap.fecha ?? "-"}   Bodega: ${ap.bodega ?? "-"}`
+        );
+        doc.text(
+          `Producto: ${ap.producto}   Cantidad: ${ap.cantidad} ${
+            ap.unidad
+          }`
+        );
+        doc.moveDown(0.6);
+      });
+    });
+
+    const safeCodigo = lote.codigo.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+    return {
+      filename: `lote_${safeCodigo}_historial.pdf`,
+      mime: "application/pdf",
+      content: buffer,
     };
   },
 };
