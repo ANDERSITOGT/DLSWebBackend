@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import inicioRouter from "./routes/inicio";
 import inventarioRouter from "./routes/inventario";
 import categoriasRouter from "./routes/categorias";
+import movimientosRoutes from "./routes/movimientos";
 
 dotenv.config();
 
@@ -20,6 +21,8 @@ app.use(express.json());
 app.use("/api/inicio", inicioRouter);
 app.use("/api/inventario", inventarioRouter);
 app.use("/api/categorias", categoriasRouter);
+app.use("/api/movimientos", movimientosRoutes);
+
 
 // Health check sencillo
 app.get("/api/health", async (_req, res) => {
