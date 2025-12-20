@@ -7,6 +7,7 @@ import inicioRouter from "./routes/inicio";
 import inventarioRouter from "./routes/inventario";
 import categoriasRouter from "./routes/categorias";
 import movimientosRoutes from "./routes/movimientos";
+import solicitudesRouter from "./routes/solicitudes";
 
 dotenv.config();
 
@@ -22,6 +23,7 @@ app.use("/api/inicio", inicioRouter);
 app.use("/api/inventario", inventarioRouter);
 app.use("/api/categorias", categoriasRouter);
 app.use("/api/movimientos", movimientosRoutes);
+app.use("/api/solicitudes", solicitudesRouter);
 
 
 // Health check sencillo
