@@ -1,7 +1,7 @@
-// src/services/solicitudesService.ts
 import prisma from "../prisma";
 import PDFDocument from "pdfkit";
 
+// Definimos los tipos explícitamente para evitar errores
 export type EstadoSolicitud = "PENDIENTE" | "APROBADA" | "RECHAZADA" | "ENTREGADA";
 
 type CrearSolicitudProductoDTO = {
@@ -20,7 +20,7 @@ export type CrearSolicitudDTO = {
 };
 
 // ===================================================
-// LISTA - para las tarjetas de "Mis Solicitudes"
+// LISTA - Mis Solicitudes
 // ===================================================
 async function getSolicitudes(opciones: {
   estado?: EstadoSolicitud;
@@ -29,7 +29,7 @@ async function getSolicitudes(opciones: {
   const { estado, solicitanteId } = opciones;
   const where: any = {};
 
-  if (estado) where.estado = estado; // campo "estado" (enum estado_solicitud)
+  if (estado) where.estado = estado;
   if (solicitanteId) where.solicitanteid = solicitanteId;
 
   const solicitudes = await prisma.solicitud.findMany({
@@ -38,23 +38,23 @@ async function getSolicitudes(opciones: {
     include: {
       bodega: true,
       usuario_solicitud_solicitanteidTousuario: true,
-      solicitud_item: true, // solo para saber cuántos productos tiene
+      solicitud_item: true,
     },
   });
 
   return solicitudes.map((s) => ({
     id: s.id,
-    codigo: s.id, // de momento usamos el id como código
+    codigo: s.id,
     fecha: s.fecha,
     estado: s.estado as EstadoSolicitud,
-    bodegaNombre: s.bodega?.nombre ?? "",
-    solicitanteNombre: s.usuario_solicitud_solicitanteidTousuario?.nombre ?? "",
+    bodegaNombre: s.bodega?.nombre ?? "Sin Bodega",
+    solicitanteNombre: s.usuario_solicitud_solicitanteidTousuario?.nombre ?? "Desconocido",
     totalProductos: s.solicitud_item.length,
   }));
 }
 
 // ===================================================
-// DETALLE - para el modal
+// DETALLE
 // ===================================================
 async function getDetalleSolicitud(id: string) {
   const solicitud = await prisma.solicitud.findUnique({
@@ -74,15 +74,14 @@ async function getDetalleSolicitud(id: string) {
   });
 
   if (!solicitud) {
-    throw new Error("Solicitud no encontrada");
+    throw new Error(`Solicitud con id ${id} no encontrada`);
   }
 
   return {
     id: solicitud.id,
-    codigo: solicitud.id, // de momento
+    codigo: solicitud.id,
     fecha: solicitud.fecha,
     estado: solicitud.estado as EstadoSolicitud,
-    // no existe campo comentarios en el schema, así que no lo ponemos
     solicitante: {
       id: solicitud.solicitanteid,
       nombre: solicitud.usuario_solicitud_solicitanteidTousuario?.nombre ?? "",
@@ -96,9 +95,9 @@ async function getDetalleSolicitud(id: string) {
     productos: solicitud.solicitud_item.map((d) => ({
       id: d.id,
       productoId: d.productoid,
-      nombre: d.producto?.nombre ?? "",
-      codigo: d.producto?.codigo ?? "",
-      cantidad: d.cantidad,
+      nombre: d.producto?.nombre ?? "Producto eliminado",
+      codigo: d.producto?.codigo ?? "---",
+      cantidad: Number(d.cantidad), // Aseguramos que sea número (Prisma devuelve Decimal)
       unidad: d.unidad?.abreviatura ?? "",
       unidadNombre: d.unidad?.nombre ?? "",
       loteCodigo: d.lote?.codigo ?? null,
@@ -111,15 +110,14 @@ async function getDetalleSolicitud(id: string) {
 
 // ===================================================
 // CREAR SOLICITUD
-// (crea cabecera + items)
 // ===================================================
 async function crearSolicitud(input: CrearSolicitudDTO) {
   const { fecha, solicitanteid, bodegaid, productos } = input;
 
-  // Generamos un código tipo SOL-2025-0001 y lo usamos como "id"
   const baseDate = fecha ? new Date(fecha) : new Date();
   const year = baseDate.getFullYear();
 
+  // Lógica para generar ID consecutivo tipo SOL-2025-0001
   const countYear = await prisma.solicitud.count({
     where: {
       fecha: {
@@ -134,7 +132,7 @@ async function crearSolicitud(input: CrearSolicitudDTO) {
 
   const nueva = await prisma.solicitud.create({
     data: {
-      id: codigo, // sobreescribimos el default de uuid con nuestro código
+      id: codigo,
       fecha: baseDate,
       estado: "PENDIENTE",
       solicitanteid,
@@ -155,15 +153,18 @@ async function crearSolicitud(input: CrearSolicitudDTO) {
 }
 
 // ===================================================
-// CAMBIAR ESTADO (aprobar, rechazar, entregada)
+// CAMBIAR ESTADO
 // ===================================================
 async function actualizarEstadoSolicitud(
   id: string,
   estado: EstadoSolicitud,
-  aprobadorId?: string | null
+  // OJO: Cambié el nombre del parámetro para que sea claro.
+  // Tu ruta estaba enviando 'comentarios' aquí, lo cual era un error.
+  aprobadorId?: string | null 
 ) {
   const data: any = { estado };
 
+  // Solo si enviamos un ID de aprobador válido, lo guardamos
   if (aprobadorId) {
     data.aprobadorid = aprobadorId;
   }
@@ -177,70 +178,60 @@ async function actualizarEstadoSolicitud(
 }
 
 // ===================================================
-// GENERAR PDF DEL DETALLE
-// (sin get-stream, usando buffers manualmente)
+// EXPORTAR PDF
 // ===================================================
 async function exportSolicitudDetallePDF(id: string) {
   const detalle = await getDetalleSolicitud(id);
 
   const doc = new PDFDocument({ margin: 40, size: "A4" });
-
-  // Recolectar los chunks en memoria y devolver un Buffer
   const chunks: Buffer[] = [];
 
   return await new Promise<{ filename: string; mime: string; content: Buffer }>(
     (resolve, reject) => {
-      doc.on("data", (chunk) => {
-        chunks.push(chunk as Buffer);
-      });
-
+      doc.on("data", (chunk) => chunks.push(chunk as Buffer));
+      doc.on("error", (err) => reject(err));
+      
       doc.on("end", () => {
         const buffer = Buffer.concat(chunks);
-        const filename = `${detalle.codigo}.pdf`;
-        const mime = "application/pdf";
-        resolve({ filename, mime, content: buffer });
+        resolve({
+          filename: `${detalle.codigo}.pdf`,
+          mime: "application/pdf",
+          content: buffer
+        });
       });
 
-      doc.on("error", (err) => {
-        reject(err);
-      });
-
-      // ======= CONTENIDO DEL PDF =======
+      // --- Diseño del PDF ---
       doc.fontSize(18).text(`Solicitud ${detalle.codigo}`, { align: "left" });
       doc.moveDown(0.5);
-      doc
-        .fontSize(10)
-        .text(`Fecha: ${detalle.fecha?.toISOString().slice(0, 10) ?? ""}`);
+      
+      doc.fontSize(10);
+      doc.text(`Fecha: ${detalle.fecha?.toISOString().split('T')[0] ?? ""}`);
       doc.text(`Estado: ${detalle.estado}`);
+      
       if (detalle.bodega) {
         doc.text(`Bodega: ${detalle.bodega.nombre}`);
       }
       doc.text(`Solicitante: ${detalle.solicitante.nombre}`);
-      if (detalle.documentoSalidaConsecutivo) {
-        doc.text(
-          `Documento de salida: ${detalle.documentoSalidaConsecutivo} (${detalle.documentoSalidaId})`
-        );
-      }
 
       doc.moveDown(1);
-      doc.fontSize(12).text("Productos", { underline: true });
+      doc.fontSize(12).text("Productos Solicitados", { underline: true });
       doc.moveDown(0.5);
+      
       doc.fontSize(10);
-
       detalle.productos.forEach((p) => {
-        doc.text(
-          `• ${p.nombre} (${p.codigo}) - ${p.cantidad} ${p.unidad}${
-            p.loteCodigo ? ` | Lote: ${p.loteCodigo}` : ""
-          }${p.notas ? ` — ${p.notas}` : ""}`
-        );
+        const linea = `• ${p.nombre} (${p.codigo}) - ${p.cantidad} ${p.unidad}`;
+        const extra = p.loteCodigo ? ` | Lote: ${p.loteCodigo}` : "";
+        const notas = p.notas ? ` | Nota: ${p.notas}` : "";
+        
+        doc.text(linea + extra + notas);
       });
 
       doc.end();
-      // ======= FIN CONTENIDO PDF =======
     }
   );
 }
 
+// Exportación por defecto para que funcione el import en la ruta
 export default {
   getSolicitudes,
   getDetalleSolicitud,

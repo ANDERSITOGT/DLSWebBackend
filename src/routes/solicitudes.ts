@@ -1,5 +1,5 @@
-// src/routes/solicitudes.ts
 import { Router } from "express";
+// Asegúrate de que solicitudesService tenga un 'export default' o usa { ... } si son exports nombrados
 import solicitudesService from "../services/solicitudesService";
 
 const router = Router();
@@ -11,10 +11,12 @@ router.get("/", async (req, res) => {
   try {
     const { estado, mis } = req.query;
 
-    // Cuando tengas auth, aquí usas el id del usuario del token.
-    // De momento lo dejamos así, igual que hemos hecho en otros módulos.
+    // CORRECCIÓN 1: TypeScript no sabe qué es 'req.user', usamos (req as any)
+    const user = (req as any).user;
+    
+    // Si 'mis' es true y existe el usuario, usamos su ID
     const solicitanteId =
-      mis === "true" && req.user ? (req.user as any).id : undefined;
+      mis === "true" && user ? user.id : undefined;
 
     const data = await solicitudesService.getSolicitudes({
       estado: estado as any,
@@ -33,7 +35,9 @@ router.get("/", async (req, res) => {
 // ===============================
 router.get("/:id", async (req, res) => {
   try {
-    const id = Number(req.params.id);
+    // CORRECCIÓN 2: Tu ID en Prisma es un String (UUID), NO un Number.
+    const id = req.params.id; 
+    
     const data = await solicitudesService.getDetalleSolicitud(id);
     res.json(data);
   } catch (error) {
@@ -49,8 +53,9 @@ router.post("/", async (req, res) => {
   try {
     const body = req.body;
 
-    // Si tienes middleware de auth, tomamos el solicitante del token:
-    const solicitanteId = (req.user as any)?.id ?? body.solicitanteId;
+    // CORRECCIÓN: Usamos (req as any) para acceder al usuario
+    const user = (req as any).user;
+    const solicitanteId = user?.id ?? body.solicitanteId;
 
     const data = await solicitudesService.crearSolicitud({
       ...body,
@@ -69,21 +74,23 @@ router.post("/", async (req, res) => {
 // ===============================
 router.patch("/:id/estado", async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    const { estado, comentarios } = req.body;
+    // CORRECCIÓN: ID como String
+    const id = req.params.id;
+    // CORRECCIÓN SUGERIDA PARA EL ROUTE
+    const { estado } = req.body; 
+    // Obtenemos el ID del usuario actual (si existe) para marcar quién aprobó
+    const aprobadorId = (req as any).user?.id; 
 
     const data = await solicitudesService.actualizarEstadoSolicitud(
       id,
       estado,
-      comentarios
+      aprobadorId // Ahora sí pasamos un ID de usuario, no un texto de comentario
     );
 
     res.json(data);
   } catch (error) {
     console.error("Error en PATCH /api/solicitudes/:id/estado:", error);
-    res
-      .status(500)
-      .json({ message: "Error al actualizar estado de solicitud" });
+    res.status(500).json({ message: "Error al actualizar estado de solicitud" });
   }
 });
 
@@ -92,7 +99,9 @@ router.patch("/:id/estado", async (req, res) => {
 // ===============================
 router.get("/:id/export", async (req, res) => {
   try {
-    const id = Number(req.params.id);
+    // CORRECCIÓN: ID como String
+    const id = req.params.id;
+    
     const { filename, mime, content } =
       await solicitudesService.exportSolicitudDetallePDF(id);
 
