@@ -9,6 +9,8 @@ import categoriasRouter from "./routes/categorias";
 import movimientosRoutes from "./routes/movimientos";
 import solicitudesRouter from "./routes/solicitudes";
 import authRouter from "./routes/auth";
+import movimientosRouter from "./routes/movimientos"; 
+import catalogosRouter from "./routes/catalogos";
 
 dotenv.config();
 
@@ -26,6 +28,8 @@ app.use("/api/inventario", inventarioRouter);
 app.use("/api/categorias", categoriasRouter);
 app.use("/api/movimientos", movimientosRoutes);
 app.use("/api/solicitudes", solicitudesRouter);
+app.use("/api/movimientos", movimientosRouter);
+app.use("/api/catalogos", catalogosRouter);
 
 
 // Health check sencillo

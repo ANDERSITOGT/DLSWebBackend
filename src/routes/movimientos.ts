@@ -1,8 +1,84 @@
 // src/routes/movimientos.ts
-import { Router } from "express";
-import { movimientosService } from "../services/movimientosService";
+import { Router, Response } from "express";
+import prisma from "../prisma"; // Asegúrate que la ruta a prisma sea correcta
+import { authenticateToken, AuthRequest } from "../middlewares/auth"; // El middleware de seguridad
+import { movimientosService } from "../services/movimientosService"; // Tu servicio existente
 
 const router = Router();
+
+// ==========================================
+// NUEVO: REGISTRAR INGRESO
+// POST /api/movimientos/ingreso
+// ==========================================
+router.post("/ingreso", authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { 
+      bodegaId, 
+      proveedorId, 
+      fecha, 
+      factura, 
+      observaciones, 
+      items 
+    } = req.body;
+
+    // 1. Validaciones básicas
+    if (!bodegaId || !items || items.length === 0) {
+      return res.status(400).json({ message: "Faltan datos obligatorios (bodega o productos)." });
+    }
+
+    // Obtenemos el ID del usuario desde el token
+    const userId = req.user?.id;
+    if (!userId) return res.status(403).json({ message: "Error de identidad de usuario" });
+
+    // 2. Transacción de Base de Datos
+    const resultado = await prisma.$transaction(async (tx) => {
+      
+      // A. Crear el Documento Principal
+      const documento = await tx.documento.create({
+        data: {
+          tipo: "INGRESO",
+          estado: "APROBADO",
+          fecha: new Date(fecha),
+          bodegadestinoid: bodegaId,
+          proveedorid: proveedorId || null,
+          creadorid: userId,
+          observacion: factura 
+            ? `[Factura: ${factura}] ${observaciones || ""}` 
+            : observaciones,
+        },
+      });
+
+      // B. Crear los Items
+      for (const item of items) {
+        // Buscamos info del producto (principalmente la unidad)
+        const productoInfo = await tx.producto.findUnique({
+            where: { id: item.productoId }
+        });
+
+        if (!productoInfo) throw new Error(`Producto ${item.productoId} no encontrado`);
+
+        await tx.documento_item.create({
+          data: {
+            documentoid: documento.id,
+            productoid: item.productoId,
+            cantidad: item.cantidad,
+            costounit: item.costo,
+            unidadid: productoInfo.unidadid,
+            loteid: item.loteId || null
+          },
+        });
+      }
+
+      return documento;
+    });
+
+    res.json({ ok: true, documento: resultado, message: "Ingreso registrado correctamente" });
+
+  } catch (error: any) {
+    console.error("Error al crear ingreso:", error);
+    res.status(500).json({ message: "Error interno al guardar el ingreso", error: error.message });
+  }
+});
 
 // ================================
 // LISTADO DE DOCUMENTOS (tarjetas Movimientos)
@@ -14,9 +90,25 @@ router.get("/", async (req, res) => {
     res.json({ movimientos: data });
   } catch (error) {
     console.error("Error en GET /api/movimientos:", error);
-    res
-      .status(500)
-      .json({ message: "Error al obtener movimientos" });
+    res.status(500).json({ message: "Error al obtener movimientos" });
+  }
+});
+
+// ================================
+// EXPORT LISTADO DE MOVIMIENTOS (PDF)
+// GET /api/movimientos/export
+// (Mover antes de /:id para evitar conflicto de rutas)
+// ================================
+router.get("/export", async (req, res) => {
+  try {
+    const { filename, mime, content } = await movimientosService.exportListadoMovimientosPDF();
+
+    res.setHeader("Content-Type", mime);
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(content);
+  } catch (error) {
+    console.error("Error en GET /api/movimientos/export:", error);
+    res.status(500).send("Error al exportar listado de movimientos");
   }
 });
 
@@ -44,10 +136,7 @@ router.get("/lotes/:id", async (req, res) => {
     const data = await movimientosService.getDetalleLote(loteId);
     res.json(data);
   } catch (error) {
-    console.error(
-      "Error en GET /api/movimientos/lotes/:id:",
-      error
-    );
+    console.error("Error en GET /api/movimientos/lotes/:id:", error);
     res.status(500).json({ message: "Error al obtener lote" });
   }
 });
@@ -59,46 +148,14 @@ router.get("/lotes/:id", async (req, res) => {
 router.get("/lotes/:id/export", async (req, res) => {
   try {
     const loteId = req.params.id;
-    const { filename, mime, content } =
-      await movimientosService.exportHistorialLotePDF(loteId);
+    const { filename, mime, content } = await movimientosService.exportHistorialLotePDF(loteId);
 
     res.setHeader("Content-Type", mime);
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}"`
-    );
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(content);
   } catch (error) {
-    console.error(
-      "Error en GET /api/movimientos/lotes/:id/export:",
-      error
-    );
-    res
-      .status(500)
-      .send("Error al exportar historial de aplicaciones del lote");
-  }
-});
-
-// ================================
-// EXPORT LISTADO DE MOVIMIENTOS (PDF)
-// GET /api/movimientos/export
-// ================================
-router.get("/export", async (req, res) => {
-  try {
-    const { filename, mime, content } =
-      await movimientosService.exportListadoMovimientosPDF();
-
-    res.setHeader("Content-Type", mime);
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}"`
-    );
-    res.send(content);
-  } catch (error) {
-    console.error("Error en GET /api/movimientos/export:", error);
-    res
-      .status(500)
-      .send("Error al exportar listado de movimientos");
+    console.error("Error en GET /api/movimientos/lotes/:id/export:", error);
+    res.status(500).send("Error al exportar historial de aplicaciones del lote");
   }
 });
 
@@ -113,9 +170,7 @@ router.get("/:id", async (req, res) => {
     res.json(data);
   } catch (error) {
     console.error("Error en GET /api/movimientos/:id:", error);
-    res
-      .status(500)
-      .json({ message: "Error al obtener detalle de movimiento" });
+    res.status(500).json({ message: "Error al obtener detalle de movimiento" });
   }
 });
 
@@ -126,20 +181,14 @@ router.get("/:id", async (req, res) => {
 router.get("/:id/export", async (req, res) => {
   try {
     const id = req.params.id;
-    const { filename, mime, content } =
-      await movimientosService.exportMovimientoDetallePDF(id);
+    const { filename, mime, content } = await movimientosService.exportMovimientoDetallePDF(id);
 
     res.setHeader("Content-Type", mime);
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}"`
-    );
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(content);
   } catch (error) {
     console.error("Error en GET /api/movimientos/:id/export:", error);
-    res
-      .status(500)
-      .send("Error al exportar detalle de movimiento");
+    res.status(500).send("Error al exportar detalle de movimiento");
   }
 });
 
