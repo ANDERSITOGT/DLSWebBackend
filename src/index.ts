@@ -8,6 +8,7 @@ import inventarioRouter from "./routes/inventario";
 import categoriasRouter from "./routes/categorias";
 import movimientosRoutes from "./routes/movimientos";
 import solicitudesRouter from "./routes/solicitudes";
+import authRouter from "./routes/auth";
 
 dotenv.config();
 
@@ -20,6 +21,7 @@ app.use(express.json());
 
 // Rutas
 app.use("/api/inicio", inicioRouter);
+app.use("/api/auth", authRouter);
 app.use("/api/inventario", inventarioRouter);
 app.use("/api/categorias", categoriasRouter);
 app.use("/api/movimientos", movimientosRoutes);
