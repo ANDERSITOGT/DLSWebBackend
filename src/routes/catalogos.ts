@@ -56,4 +56,23 @@ router.get("/productos-busqueda", async (req, res) => {
   }
 });
 
+
+// GET /api/catalogos/fincas-lotes
+// Devuelve fincas con sus lotes activos para los selectores en cascada
+router.get("/fincas-lotes", async (req, res) => {
+  try {
+    const fincas = await prisma.finca.findMany({
+      include: {
+        lote: {
+          where: { estado: "ABIERTO" }, // Solo lotes activos
+          select: { id: true, codigo: true, cultivo: { select: { nombre: true } } }
+        }
+      }
+    });
+    res.json(fincas);
+  } catch (error) {
+    res.status(500).json({ error: "Error al obtener fincas y lotes" });
+  }
+});
+
 export default router;
