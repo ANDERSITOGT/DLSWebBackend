@@ -75,4 +75,39 @@ router.get("/fincas-lotes", async (req, res) => {
   }
 });
 
+
+// src/routes/catalogos.ts
+
+
+// GET /api/catalogos/productos/buscar
+router.get("/productos/buscar", async (req, res) => {
+  try {
+    const q = (req.query.q as string) || ""; 
+
+    const productos = await prisma.producto.findMany({
+      where: {
+        AND: [
+          { activo: true }, 
+          {
+            OR: [
+              { nombre: { contains: q, mode: "insensitive" } },
+              { codigo: { contains: q, mode: "insensitive" } },
+            ],
+          },
+        ],
+      },
+      // take: 50,  <-- ❌ ELIMINADO: Ahora traerá TODO el listado
+      include: {
+        unidad: true,
+      },
+      orderBy: { nombre: 'asc' } 
+    });
+
+    res.json(productos);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error al buscar productos" });
+  }
+});
+
 export default router;

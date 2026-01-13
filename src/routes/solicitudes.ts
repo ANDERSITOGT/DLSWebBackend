@@ -166,4 +166,99 @@ router.get("/:id/export", async (req, res) => {
   }
 });
 
+
+// src/routes/solicitudes.ts
+
+// ... (El resto del archivo sigue igual arriba)
+
+// ===============================
+// POST /api/solicitudes/:id/entregar
+// ===============================
+// 👇 AQUÍ ESTABA EL ERROR: Faltaba 'authenticateToken'
+router.post("/:id/entregar", authenticateToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const userId = (req as any).user?.id; 
+
+    // 👇 Validacion de seguridad extra
+    if (!userId) {
+        return res.status(401).json({ message: "No se pudo identificar al usuario que realiza la entrega." });
+    }
+
+    const resultado = await prisma.$transaction(async (tx) => {
+      // 1. Buscar la solicitud original
+      const solicitud = await tx.solicitud.findUnique({
+        where: { id },
+        include: { solicitud_item: true }
+      });
+
+      if (!solicitud) throw new Error("Solicitud no encontrada");
+      if (solicitud.estado !== "APROBADA") throw new Error("La solicitud debe estar APROBADA para poder entregarse.");
+
+      // 2. Generar Consecutivo (SAL-202X-XXXX)
+      const fechaActual = new Date();
+      const year = fechaActual.getFullYear();
+      
+      const countDocs = await tx.documento.count({
+        where: {
+          tipo: "SALIDA",
+          fecha: {
+            gte: new Date(`${year}-01-01`),
+            lt: new Date(`${year + 1}-01-01`),
+          }
+        }
+      });
+      const correlativo = String(countDocs + 1).padStart(4, "0");
+      const codigoDoc = `SAL-${year}-${correlativo}`;
+
+      // 3. Crear el Documento de Salida
+      const documento = await tx.documento.create({
+        data: {
+          tipo: "SALIDA",
+          estado: "APROBADO",
+          fecha: fechaActual,
+          creadorid: userId, // 👈 Ahora sí tendrá valor
+          bodegaorigenid: solicitud.bodegaid,
+          solicitanteid: solicitud.solicitanteid,
+          consecutivo: codigoDoc,
+          observacion: `Generado automáticamente desde Solicitud ${solicitud.id}`
+        }
+      });
+
+      // 4. Copiar Items
+      for (const item of solicitud.solicitud_item) {
+        await tx.documento_item.create({
+          data: {
+            documentoid: documento.id,
+            productoid: item.productoid,
+            unidadid: item.unidadid,
+            cantidad: item.cantidad,
+            loteid: item.loteid,
+            notas: item.notas
+          }
+        });
+      }
+
+      // 5. Actualizar Solicitud
+      const solicitudActualizada = await tx.solicitud.update({
+        where: { id },
+        data: {
+          estado: "ENTREGADA",
+          documentosalidaid: documento.id
+        }
+      });
+
+      return { solicitud: solicitudActualizada, documentoId: documento.id, codigoDoc };
+    });
+
+    res.json(resultado);
+
+  } catch (error: any) {
+    console.error("Error en POST /api/solicitudes/:id/entregar:", error);
+    res.status(500).json({ message: error.message || "Error al procesar la entrega" });
+  }
+});
+
+
+
 export default router;
