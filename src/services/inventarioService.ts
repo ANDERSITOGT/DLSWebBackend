@@ -58,8 +58,11 @@ export type CategoriaFiltroDTO = {
 // Helpers
 // ===============================
 function calcularEstadoStock(cantidad: number): EstadoStock {
-  if (cantidad <= 0) return "Crítico";
-  if (cantidad < 20) return "Bajo";
+  // 1. REGLA DE NEGOCIO ACTUALIZADA
+  // Antes: <= 0 (Crítico), < 50 (Bajo)
+  // Ahora: <= 50 (Crítico), <= 100 (Bajo) - Ajustamos Bajo para tener margen de alerta
+  if (cantidad <= 50) return "Crítico";
+  if (cantidad <= 100) return "Bajo"; 
   return "Normal";
 }
 
@@ -173,18 +176,18 @@ export const inventarioService = {
       throw new Error("Producto no encontrado");
     }
 
-    // 2) Movimientos del producto (últimos 10)
+    // 2) Movimientos del producto
     const movimientosRaw = await prisma.documento_item.findMany({
       where: { productoid: productoId },
       include: {
-        documento: true, // NO usamos include de 'bodega' para evitar el error
+        documento: true, 
         unidad: true,
         lote: true,
       },
       orderBy: {
-        createdat: "desc",
+        createdat: "desc", // O fecha del documento si prefieres orden lógico
       },
-      take: 10,
+      take: 50, // 👈 2. LÍMITE AUMENTADO A 50
     });
 
     // 2.1) Cargamos las bodegas para poder traducir origenid/destinoid a nombres
@@ -212,7 +215,6 @@ export const inventarioService = {
           signo = -1;
           break;
         case "TRANSFERENCIA":
-          // Para existencia global, 0 (pero igual mostramos el movimiento)
           signo = 0;
           break;
         case "AJUSTE":
@@ -255,7 +257,7 @@ export const inventarioService = {
 
       return {
         id: item.id,
-        documentoId: doc.id,
+        documentoId: doc.consecutivo || doc.id, // Preferimos consecutivo visual
         tipo: doc.tipo,
         cantidadConSigno,
         unidad: unidadAbrev,
