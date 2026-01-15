@@ -1,3 +1,4 @@
+// src/services/solicitudesService.ts
 import prisma from "../prisma";
 import PDFDocument from "pdfkit";
 
@@ -20,7 +21,7 @@ export type CrearSolicitudDTO = {
 };
 
 // ===================================================
-// LISTA - Mis Solicitudes
+// LISTA - Mis Solicitudes (LIMITADO A 50)
 // ===================================================
 async function getSolicitudes(opciones: {
   estado?: EstadoSolicitud;
@@ -35,6 +36,7 @@ async function getSolicitudes(opciones: {
   const solicitudes = await prisma.solicitud.findMany({
     where,
     orderBy: { fecha: "desc" },
+    take: 50, // 👈 1. LÍMITE DE 50 SOLICITUDES
     include: {
       bodega: true,
       usuario_solicitud_solicitanteidTousuario: true,
@@ -97,7 +99,7 @@ async function getDetalleSolicitud(id: string) {
       productoId: d.productoid,
       nombre: d.producto?.nombre ?? "Producto eliminado",
       codigo: d.producto?.codigo ?? "---",
-      cantidad: Number(d.cantidad), // Aseguramos que sea número (Prisma devuelve Decimal)
+      cantidad: Number(d.cantidad), 
       unidad: d.unidad?.abreviatura ?? "",
       unidadNombre: d.unidad?.nombre ?? "",
       loteCodigo: d.lote?.codigo ?? null,
@@ -158,13 +160,10 @@ async function crearSolicitud(input: CrearSolicitudDTO) {
 async function actualizarEstadoSolicitud(
   id: string,
   estado: EstadoSolicitud,
-  // OJO: Cambié el nombre del parámetro para que sea claro.
-  // Tu ruta estaba enviando 'comentarios' aquí, lo cual era un error.
   aprobadorId?: string | null 
 ) {
   const data: any = { estado };
 
-  // Solo si enviamos un ID de aprobador válido, lo guardamos
   if (aprobadorId) {
     data.aprobadorid = aprobadorId;
   }
@@ -231,7 +230,7 @@ async function exportSolicitudDetallePDF(id: string) {
   );
 }
 
-// Exportación por defecto para que funcione el import en la ruta
+// Exportación por defecto
 export default {
   getSolicitudes,
   getDetalleSolicitud,
