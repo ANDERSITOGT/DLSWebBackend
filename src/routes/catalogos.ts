@@ -1,3 +1,4 @@
+// src/routes/catalogos.ts
 import { Router } from "express";
 import prisma from "../prisma";
 
@@ -7,7 +8,7 @@ const router = Router();
 router.get("/bodegas", async (req, res) => {
   try {
     const bodegas = await prisma.bodega.findMany({
-      select: { id: true, nombre: true } // Solo traemos lo necesario
+      select: { id: true, nombre: true } 
     });
     res.json(bodegas);
   } catch (error) {
@@ -19,7 +20,8 @@ router.get("/bodegas", async (req, res) => {
 router.get("/proveedores", async (req, res) => {
   try {
     const proveedores = await prisma.proveedor.findMany({
-      select: { id: true, nombre: true }
+      // 👇 AGREGADO: 'nit' (Para que el modal de Ingreso lo muestre)
+      select: { id: true, nombre: true, nit: true }
     });
     res.json(proveedores);
   } catch (error) {
@@ -28,13 +30,12 @@ router.get("/proveedores", async (req, res) => {
 });
 
 // GET /api/catalogos/productos-busqueda
-// Usaremos esto para el autocompletado
+// Usaremos esto para el autocompletado rápido
 router.get("/productos-busqueda", async (req, res) => {
   try {
     const term = req.query.q as string;
     const productos = await prisma.producto.findMany({
       where: {
-        // Si hay término de búsqueda, filtramos. Si no, traemos los primeros 20.
         ...(term ? {
           OR: [
             { nombre: { contains: term, mode: 'insensitive' } },
@@ -42,12 +43,14 @@ router.get("/productos-busqueda", async (req, res) => {
           ]
         } : {})
       },
-      take: 20, // Limitamos a 20 para no saturar
+      take: 20, 
       select: { 
         id: true, 
         nombre: true, 
         codigo: true, 
-        unidad: { select: { abreviatura: true } } // Necesitamos saber la unidad
+        // 👇 AGREGADO: 'precioref' (Para pre-llenar el costo)
+        precioref: true,
+        unidad: { select: { abreviatura: true } } 
       }
     });
     res.json(productos);
@@ -56,15 +59,13 @@ router.get("/productos-busqueda", async (req, res) => {
   }
 });
 
-
 // GET /api/catalogos/fincas-lotes
-// Devuelve fincas con sus lotes activos para los selectores en cascada
 router.get("/fincas-lotes", async (req, res) => {
   try {
     const fincas = await prisma.finca.findMany({
       include: {
         lote: {
-          where: { estado: "ABIERTO" }, // Solo lotes activos
+          where: { estado: "ABIERTO" }, 
           select: { id: true, codigo: true, cultivo: { select: { nombre: true } } }
         }
       }
@@ -75,11 +76,8 @@ router.get("/fincas-lotes", async (req, res) => {
   }
 });
 
-
-// src/routes/catalogos.ts
-
-
 // GET /api/catalogos/productos/buscar
+// (Búsqueda completa, este ya trae todo por defecto con 'include')
 router.get("/productos/buscar", async (req, res) => {
   try {
     const q = (req.query.q as string) || ""; 
@@ -96,7 +94,6 @@ router.get("/productos/buscar", async (req, res) => {
           },
         ],
       },
-      // take: 50,  <-- ❌ ELIMINADO: Ahora traerá TODO el listado
       include: {
         unidad: true,
       },
