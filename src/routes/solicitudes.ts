@@ -1,4 +1,3 @@
-// src/routes/solicitudes.ts
 import { Router, Response } from "express";
 import prisma from "../prisma";
 import { authenticateToken, AuthRequest } from "../middlewares/auth";
@@ -8,12 +7,12 @@ const router = Router();
 
 // ===============================
 // GET /api/solicitudes
-// (Restaurado: Sin authenticateToken para que cargue la lista)
+// (SIN PROTECCIÓN para que cargue la lista en el Dashboard sin error)
 // ===============================
 router.get("/", async (req, res) => {
   try {
     const { estado, mis } = req.query;
-    // Intentamos leer el usuario si viene, pero no forzamos error si no viene
+    // Intentamos leer el usuario si viene el token, pero no fallamos si no viene
     const user = (req as any).user;
     const solicitanteId = mis === "true" && user ? user.id : undefined;
 
@@ -30,7 +29,7 @@ router.get("/", async (req, res) => {
 
 // ===============================
 // GET /api/solicitudes/:id
-// (Restaurado: Sin authenticateToken)
+// (SIN PROTECCIÓN para ver el detalle sin problemas)
 // ===============================
 router.get("/:id", async (req, res) => {
   try {
@@ -45,7 +44,8 @@ router.get("/:id", async (req, res) => {
 
 // ===============================
 // POST /api/solicitudes
-// CREAR (Este SÍ lleva authenticateToken para identificar al usuario y evitar el error de ID)
+// CREAR NUEVA SOLICITUD
+// (CON PROTECCIÓN: Necesaria para identificar al usuario creador)
 // ===============================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   console.log("📥 Recibiendo solicitud:", req.body);
@@ -53,21 +53,22 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { bodegaId, items, solicitanteId: bodySolicitanteId } = req.body;
     
-    // 1. Identificar Usuario (Gracias a authenticateToken, req.user existe)
+    // 1. Identificar Usuario (Usamos req.user gracias al token)
     const user = req.user;
     const finalSolicitanteId = user?.id ?? bodySolicitanteId;
 
     if (!finalSolicitanteId) {
-        return res.status(400).json({ message: "No se identificó al solicitante" });
+        return res.status(400).json({ message: "No se identificó al solicitante (Error de sesión)" });
     }
     
     if (!bodegaId || !items || items.length === 0) {
-        return res.status(400).json({ message: "Faltan datos obligatorios." });
+        return res.status(400).json({ message: "Faltan datos obligatorios (bodega o items)." });
     }
 
-    // 2. Transacción
+    // 2. Transacción de Base de Datos
     const nuevaSolicitud = await prisma.$transaction(async (tx) => {
       
+      // A. Generar ID Correlativo
       const fechaActual = new Date();
       const year = fechaActual.getFullYear();
       
@@ -83,7 +84,7 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
       const correlativo = String(countYear + 1).padStart(4, "0");
       const codigoGenerado = `SOL-${year}-${correlativo}`;
 
-      // Crear Cabecera
+      // B. Crear Cabecera
       const solicitud = await tx.solicitud.create({
         data: {
           id: codigoGenerado,
@@ -94,7 +95,7 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
         }
       });
 
-      // Crear Items
+      // C. Crear Items
       for (const item of items) {
         const prod = await tx.producto.findUnique({
              where: { id: item.productoId },
@@ -117,7 +118,10 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
       return solicitud;
     });
 
-    // Devolvemos la estructura CORRECTA para que el frontend no falle al leer .id
+    console.log("✅ Solicitud creada:", nuevaSolicitud.id);
+    
+    // 👇 ESTO ARREGLA EL ERROR DEL ID UNDEFINED
+    // El frontend espera: data.solicitud.id
     res.status(201).json({ ok: true, solicitud: nuevaSolicitud });
 
   } catch (error: any) {
@@ -128,6 +132,7 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 
 // ===============================
 // PATCH /api/solicitudes/:id/estado
+// (CON PROTECCIÓN: Solo usuarios autenticados pueden aprobar/rechazar)
 // ===============================
 router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -149,6 +154,7 @@ router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Res
 
 // ===============================
 // GET /api/solicitudes/:id/export
+// Descarga PDF (Sin protección estricta para facilitar descarga)
 // ===============================
 router.get("/:id/export", async (req, res) => {
   try {
@@ -166,7 +172,7 @@ router.get("/:id/export", async (req, res) => {
 
 // ===============================
 // POST /api/solicitudes/:id/entregar
-// (Este también necesita authenticateToken para saber quién entrega)
+// (CON PROTECCIÓN: Necesaria para saber quién entrega)
 // ===============================
 router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -178,6 +184,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
     }
 
     const resultado = await prisma.$transaction(async (tx) => {
+      // 1. Buscar la solicitud original
       const solicitud = await tx.solicitud.findUnique({
         where: { id },
         include: { solicitud_item: true }
@@ -186,6 +193,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
       if (!solicitud) throw new Error("Solicitud no encontrada");
       if (solicitud.estado !== "APROBADA") throw new Error("La solicitud debe estar APROBADA para poder entregarse.");
 
+      // 2. Generar Consecutivo Salida
       const fechaActual = new Date();
       const year = fechaActual.getFullYear();
       
@@ -201,6 +209,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
       const correlativo = String(countDocs + 1).padStart(4, "0");
       const codigoDoc = `SAL-${year}-${correlativo}`;
 
+      // 3. Crear el Documento de Salida
       const documento = await tx.documento.create({
         data: {
           tipo: "SALIDA",
@@ -214,6 +223,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
         }
       });
 
+      // 4. Copiar Items
       for (const item of solicitud.solicitud_item) {
         await tx.documento_item.create({
           data: {
@@ -227,6 +237,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
         });
       }
 
+      // 5. Actualizar Solicitud
       const solicitudActualizada = await tx.solicitud.update({
         where: { id },
         data: {
