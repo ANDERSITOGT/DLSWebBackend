@@ -1,8 +1,8 @@
 // src/routes/movimientos.ts
 import { Router, Response } from "express";
-import prisma from "../prisma"; // Asegúrate que la ruta a prisma sea correcta
-import { authenticateToken, AuthRequest } from "../middlewares/auth"; // El middleware de seguridad
-import { movimientosService } from "../services/movimientosService"; // Tu servicio existente
+import prisma from "../prisma";
+import { authenticateToken, AuthRequest } from "../middlewares/auth";
+import { movimientosService } from "../services/movimientosService";
 
 const router = Router();
 
@@ -38,7 +38,11 @@ router.post("/ingreso", authenticateToken, async (req: AuthRequest, res: Respons
         data: {
           tipo: "INGRESO",
           estado: "APROBADO",
-          fecha: new Date(fecha),
+          
+          // ✅ CORRECCIÓN APLICADA:
+          // Si la fecha viene vacía o inválida, usa la fecha actual automáticamente.
+          fecha: fecha ? new Date(fecha) : new Date(),
+          
           bodegadestinoid: bodegaId,
           proveedorid: proveedorId || null,
           creadorid: userId,
@@ -97,7 +101,6 @@ router.get("/", async (req, res) => {
 // ================================
 // EXPORT LISTADO DE MOVIMIENTOS (PDF)
 // GET /api/movimientos/export
-// (Mover antes de /:id para evitar conflicto de rutas)
 // ================================
 router.get("/export", async (req, res) => {
   try {
