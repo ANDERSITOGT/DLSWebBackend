@@ -10,6 +10,7 @@ const router = Router();
 // POST /api/auth/login
 // Recibe: { email, password }
 // Devuelve: { user, token }
+// ------------------------------------------
 // ==========================================
 router.post("/login", async (req, res) => {
   try {
