@@ -32,7 +32,8 @@ export type MovimientoResumenDTO = {
   destino: string | null;
   proveedor: string | null;
   productos: string;
-  fecha: string | null;
+  fecha: string | null;     // Fecha Documento (Contable)
+  createdat?: string;       // 👈 NUEVO: Fecha Registro (Bitácora Real)
 };
 
 export type ProductoEnMovimientoDTO = {
@@ -49,6 +50,7 @@ export type ProductoEnMovimientoDTO = {
 export type MovimientoDetalleDTO = {
   id: string;
   codigo: string;
+  consecutivo?: string; // Agregamos consecutivo aquí también por si acaso
   tipo: MovimientoTipo;
   estado: MovimientoEstado;
   fecha: string | null;
@@ -101,7 +103,8 @@ export const movimientosService = {
   // ---------------------------------------
   async getListadoMovimientos(): Promise<MovimientoResumenDTO[]> {
     const documentos = await prisma.documento.findMany({
-      orderBy: { fecha: "desc" },
+      // 👇 CAMBIO CLAVE: Ordenar por fecha de creación (Bitácora real)
+      orderBy: { createdat: "desc" },
       take: 50,
       include: {
         proveedor: true,
@@ -127,12 +130,14 @@ export const movimientosService = {
         proveedor,
         productos: productosLabel,
         fecha: d.fecha ? d.fecha.toISOString() : null,
+        // 👇 ENVIAMOS LA FECHA REAL DE REGISTRO AL FRONTEND
+        createdat: d.createdat ? d.createdat.toISOString() : undefined
       };
     });
   },
 
   // ---------------------------------------
-  // DETALLE DE UN DOCUMENTO / MOVIMIENTO (CORREGIDO)
+  // DETALLE DE UN DOCUMENTO / MOVIMIENTO
   // ---------------------------------------
   async getDetalleMovimiento(idOrCodigo: string): Promise<MovimientoDetalleDTO> {
     
@@ -140,7 +145,6 @@ export const movimientosService = {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrCodigo);
     
     // 2. Construir el filtro dinámicamente
-    // Si es UUID buscamos por ID, si no, por consecutivo
     const whereClause = isUuid ? { id: idOrCodigo } : { consecutivo: idOrCodigo };
 
     const doc = await prisma.documento.findFirst({
@@ -167,7 +171,6 @@ export const movimientosService = {
       throw new Error(`Documento no encontrado: ${idOrCodigo}`);
     }
 
-    // Mapeo de datos (igual que antes)
     const origen = doc.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
     const destino = doc.bodega_documento_bodegadestinoidTobodega?.nombre ?? null;
     const proveedor = doc.proveedor?.nombre ?? null;
@@ -196,6 +199,7 @@ export const movimientosService = {
     return {
       id: doc.id,
       codigo: doc.consecutivo ?? doc.id,
+      consecutivo: doc.consecutivo ?? undefined,
       tipo: doc.tipo as MovimientoTipo,
       estado: doc.estado as MovimientoEstado,
       fecha: doc.fecha ? doc.fecha.toISOString() : null,
@@ -271,7 +275,6 @@ export const movimientosService = {
         unidad: true,
         documento: { include: { bodega_documento_bodegaorigenidTobodega: true } },
       },
-      // ⚠️ Sin 'take' para traer historial completo
     });
 
     const aplicaciones: LoteAplicacionDTO[] = aplicacionesRaw.map((item) => {
