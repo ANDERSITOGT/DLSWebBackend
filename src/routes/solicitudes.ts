@@ -1,3 +1,4 @@
+// src/routes/solicitudes.ts
 import { Router, Response } from "express";
 import prisma from "../prisma";
 import { authenticateToken, AuthRequest } from "../middlewares/auth";
@@ -7,12 +8,10 @@ const router = Router();
 
 // ===============================
 // GET /api/solicitudes
-// (SIN PROTECCIÓN para que cargue la lista en el Dashboard sin error)
 // ===============================
 router.get("/", async (req, res) => {
   try {
     const { estado, mis } = req.query;
-    // Intentamos leer el usuario si viene el token, pero no fallamos si no viene
     const user = (req as any).user;
     const solicitanteId = mis === "true" && user ? user.id : undefined;
 
@@ -29,7 +28,6 @@ router.get("/", async (req, res) => {
 
 // ===============================
 // GET /api/solicitudes/:id
-// (SIN PROTECCIÓN para ver el detalle sin problemas)
 // ===============================
 router.get("/:id", async (req, res) => {
   try {
@@ -44,8 +42,7 @@ router.get("/:id", async (req, res) => {
 
 // ===============================
 // POST /api/solicitudes
-// CREAR NUEVA SOLICITUD
-// (CON PROTECCIÓN: Necesaria para identificar al usuario creador)
+// CREAR NUEVA SOLICITUD (CON VALIDACIÓN DE STOCK Y CONSECUTIVOS)
 // ===============================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   console.log("📥 Recibiendo solicitud:", req.body);
@@ -53,7 +50,7 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { bodegaId, items, solicitanteId: bodySolicitanteId } = req.body;
     
-    // 1. Identificar Usuario (Usamos req.user gracias al token)
+    // 1. Identificar Usuario
     const user = req.user;
     const finalSolicitanteId = user?.id ?? bodySolicitanteId;
 
@@ -68,38 +65,83 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     // 2. Transacción de Base de Datos
     const nuevaSolicitud = await prisma.$transaction(async (tx) => {
       
-      // A. Generar ID Correlativo
-      const fechaActual = new Date();
-      const year = fechaActual.getFullYear();
-      
-      const countYear = await tx.solicitud.count({
-        where: {
-          fecha: { 
-            gte: new Date(`${year}-01-01`),
-            lt: new Date(`${year + 1}-01-01`),
-          },
-        },
-      });
-      
-      const correlativo = String(countYear + 1).padStart(4, "0");
-      const codigoGenerado = `SOL-${year}-${correlativo}`;
+      // =======================================================
+      // A. VALIDACIÓN DE STOCK (CANDADO DE SEGURIDAD) 🔒
+      // =======================================================
+      for (const item of items) {
+         // Calcular entradas (Ingresos Aprobados)
+         const entradas = await tx.documento_item.aggregate({
+             _sum: { cantidad: true },
+             where: {
+                 productoid: item.productoId,
+                 documento: { tipo: "INGRESO", estado: "APROBADO" }
+             }
+         });
 
-      // B. Crear Cabecera
+         // Calcular salidas (Salidas Aprobadas)
+         const salidas = await tx.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: item.productoId,
+                documento: { tipo: "SALIDA", estado: "APROBADO" }
+            }
+        });
+
+        const totalEntradas = Number(entradas._sum.cantidad || 0);
+        const totalSalidas = Number(salidas._sum.cantidad || 0);
+        const stockActual = totalEntradas - totalSalidas;
+        const cantidadSolicitada = Number(item.cantidad);
+
+        // Si pide más de lo que hay -> ERROR
+        if (cantidadSolicitada > stockActual) {
+            // Buscamos el nombre para dar un error amable
+            const prodInfo = await tx.producto.findUnique({ where: { id: item.productoId } });
+            throw new Error(`Stock insuficiente para "${prodInfo?.nombre}". Disponible: ${stockActual}, Solicitado: ${cantidadSolicitada}`);
+        }
+      }
+
+      // =======================================================
+      // B. GENERACIÓN DE CÓDIGO (SOL-2026-XXXX) CON TABLA CONSECUTIVO
+      // =======================================================
+      const anioActual = new Date().getFullYear();
+      let nuevoCorrelativo = 1;
+
+      // Buscar o Crear contador para SOLICITUD
+      const contador = await tx.consecutivo.findUnique({
+          where: { tipo_anio: { tipo: "SOLICITUD", anio: anioActual } }
+      });
+
+      if (contador) {
+          const actualizado = await tx.consecutivo.update({
+              where: { id: contador.id },
+              data: { ultimo: { increment: 1 } }
+          });
+          nuevoCorrelativo = actualizado.ultimo || 1;
+      } else {
+          await tx.consecutivo.create({
+              data: { tipo: "SOLICITUD", anio: anioActual, ultimo: 1, prefijo: "SOL" }
+          });
+          nuevoCorrelativo = 1;
+      }
+
+      const codigoGenerado = `SOL-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
+
+      // C. Crear Cabecera
       const solicitud = await tx.solicitud.create({
         data: {
-          id: codigoGenerado,
+          id: codigoGenerado, // Usamos el código como ID (según tu esquema actual)
           solicitanteid: finalSolicitanteId,
           bodegaid: bodegaId,
           estado: "PENDIENTE",
-          fecha: fechaActual 
+          fecha: new Date() // Fecha y Hora exacta del servidor
         }
       });
 
-      // C. Crear Items
+      // D. Crear Items
       for (const item of items) {
         const prod = await tx.producto.findUnique({
-             where: { id: item.productoId },
-             select: { unidadid: true }
+              where: { id: item.productoId },
+              select: { unidadid: true }
         });
 
         if (!prod) throw new Error(`Producto ${item.productoId} no encontrado`);
@@ -119,20 +161,17 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     });
 
     console.log("✅ Solicitud creada:", nuevaSolicitud.id);
-    
-    // 👇 ESTO ARREGLA EL ERROR DEL ID UNDEFINED
-    // El frontend espera: data.solicitud.id
     res.status(201).json({ ok: true, solicitud: nuevaSolicitud });
 
   } catch (error: any) {
     console.error("❌ Error al guardar solicitud:", error);
-    res.status(500).json({ message: "Error interno al guardar", error: error.message });
+    // Enviamos el mensaje de error (ej: Stock insuficiente) al frontend
+    res.status(400).json({ message: error.message || "Error interno al guardar" });
   }
 });
 
 // ===============================
 // PATCH /api/solicitudes/:id/estado
-// (CON PROTECCIÓN: Solo usuarios autenticados pueden aprobar/rechazar)
 // ===============================
 router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -154,7 +193,6 @@ router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Res
 
 // ===============================
 // GET /api/solicitudes/:id/export
-// Descarga PDF (Sin protección estricta para facilitar descarga)
 // ===============================
 router.get("/:id/export", async (req, res) => {
   try {
@@ -172,7 +210,7 @@ router.get("/:id/export", async (req, res) => {
 
 // ===============================
 // POST /api/solicitudes/:id/entregar
-// (CON PROTECCIÓN: Necesaria para saber quién entrega)
+// (GENERACIÓN DE SALIDA AUTOMÁTICA)
 // ===============================
 router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -193,32 +231,39 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
       if (!solicitud) throw new Error("Solicitud no encontrada");
       if (solicitud.estado !== "APROBADA") throw new Error("La solicitud debe estar APROBADA para poder entregarse.");
 
-      // 2. Generar Consecutivo Salida
-      const fechaActual = new Date();
-      const year = fechaActual.getFullYear();
-      
-      const countDocs = await tx.documento.count({
-        where: {
-          tipo: "SALIDA",
-          fecha: {
-            gte: new Date(`${year}-01-01`),
-            lt: new Date(`${year + 1}-01-01`),
-          }
-        }
+      // 2. Generar Consecutivo Salida (SAL-2026-XXXX) con tabla CONSECUTIVO
+      const anioActual = new Date().getFullYear();
+      let nuevoCorrelativo = 1;
+
+      const contador = await tx.consecutivo.findUnique({
+          where: { tipo_anio: { tipo: "SALIDA", anio: anioActual } }
       });
-      const correlativo = String(countDocs + 1).padStart(4, "0");
-      const codigoDoc = `SAL-${year}-${correlativo}`;
+
+      if (contador) {
+          const actualizado = await tx.consecutivo.update({
+              where: { id: contador.id },
+              data: { ultimo: { increment: 1 } }
+          });
+          nuevoCorrelativo = actualizado.ultimo || 1;
+      } else {
+          await tx.consecutivo.create({
+              data: { tipo: "SALIDA", anio: anioActual, ultimo: 1, prefijo: "SAL" }
+          });
+          nuevoCorrelativo = 1;
+      }
+      
+      const codigoDoc = `SAL-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
 
       // 3. Crear el Documento de Salida
       const documento = await tx.documento.create({
         data: {
           tipo: "SALIDA",
           estado: "APROBADO",
-          fecha: fechaActual,
+          fecha: new Date(),
           creadorid: userId,
           bodegaorigenid: solicitud.bodegaid,
           solicitanteid: solicitud.solicitanteid,
-          consecutivo: codigoDoc,
+          consecutivo: codigoDoc, // Guardamos el código bonito
           observacion: `Generado automáticamente desde Solicitud ${solicitud.id}`
         }
       });

@@ -4,7 +4,9 @@ import prisma from "../prisma";
 
 const router = Router();
 
+// ===============================
 // GET /api/catalogos/bodegas
+// ===============================
 router.get("/bodegas", async (req, res) => {
   try {
     const bodegas = await prisma.bodega.findMany({
@@ -16,11 +18,12 @@ router.get("/bodegas", async (req, res) => {
   }
 });
 
+// ===============================
 // GET /api/catalogos/proveedores
+// ===============================
 router.get("/proveedores", async (req, res) => {
   try {
     const proveedores = await prisma.proveedor.findMany({
-      // 👇 AGREGADO: 'nit' (Para que el modal de Ingreso lo muestre)
       select: { id: true, nombre: true, nit: true }
     });
     res.json(proveedores);
@@ -29,12 +32,16 @@ router.get("/proveedores", async (req, res) => {
   }
 });
 
+// ===============================
 // GET /api/catalogos/productos-busqueda
-// Usaremos esto para el autocompletado rápido
+// (Autocompletado Rápido con Stock)
+// ===============================
 router.get("/productos-busqueda", async (req, res) => {
   try {
     const term = req.query.q as string;
-    const productos = await prisma.producto.findMany({
+    
+    // 1. Buscamos los productos (sin select específico, traemos lo básico)
+    const productosRaw = await prisma.producto.findMany({
       where: {
         ...(term ? {
           OR: [
@@ -44,22 +51,54 @@ router.get("/productos-busqueda", async (req, res) => {
         } : {})
       },
       take: 20, 
-      select: { 
-        id: true, 
-        nombre: true, 
-        codigo: true, 
-        // 👇 AGREGADO: 'precioref' (Para pre-llenar el costo)
-        precioref: true,
-        unidad: { select: { abreviatura: true } } 
+      include: {
+          unidad: { select: { abreviatura: true } }
       }
     });
-    res.json(productos);
+
+    // 2. Calculamos el stock para cada resultado
+    const productosConStock = await Promise.all(productosRaw.map(async (p) => {
+        // Sumar Entradas (Ingresos Aprobados)
+        const entradas = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: p.id,
+                documento: { tipo: "INGRESO", estado: "APROBADO" }
+            }
+        });
+
+        // Sumar Salidas (Salidas Aprobadas)
+        const salidas = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: p.id,
+                documento: { tipo: "SALIDA", estado: "APROBADO" }
+            }
+        });
+
+        const stock = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+
+        return {
+            id: p.id,
+            nombre: p.nombre,
+            codigo: p.codigo,
+            precioref: p.precioref,
+            unidad: p.unidad,
+            stockActual: stock // 👈 ¡EL DATO MÁGICO!
+        };
+    }));
+
+    res.json(productosConStock);
+
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error al buscar productos" });
   }
 });
 
+// ===============================
 // GET /api/catalogos/fincas-lotes
+// ===============================
 router.get("/fincas-lotes", async (req, res) => {
   try {
     const fincas = await prisma.finca.findMany({
@@ -76,13 +115,15 @@ router.get("/fincas-lotes", async (req, res) => {
   }
 });
 
+// ===============================
 // GET /api/catalogos/productos/buscar
-// (Búsqueda completa, este ya trae todo por defecto con 'include')
+// (Búsqueda Completa con Stock)
+// ===============================
 router.get("/productos/buscar", async (req, res) => {
   try {
     const q = (req.query.q as string) || ""; 
 
-    const productos = await prisma.producto.findMany({
+    const productosRaw = await prisma.producto.findMany({
       where: {
         AND: [
           { activo: true }, 
@@ -97,10 +138,30 @@ router.get("/productos/buscar", async (req, res) => {
       include: {
         unidad: true,
       },
-      orderBy: { nombre: 'asc' } 
+      orderBy: { nombre: 'asc' },
+      take: 50 // Limitamos para no explotar el cálculo de stock si hay miles
     });
 
-    res.json(productos);
+    // Mismo cálculo de stock
+    const productosConStock = await Promise.all(productosRaw.map(async (p) => {
+        const entradas = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: { productoid: p.id, documento: { tipo: "INGRESO", estado: "APROBADO" } }
+        });
+        const salidas = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: { productoid: p.id, documento: { tipo: "SALIDA", estado: "APROBADO" } }
+        });
+
+        const stock = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+
+        return {
+            ...p,
+            stockActual: stock
+        };
+    }));
+
+    res.json(productosConStock);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error al buscar productos" });

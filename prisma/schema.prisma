@@ -289,4 +289,5 @@ enum tipo_documento {
   TRANSFERENCIA
   AJUSTE
   DEVOLUCION
+  SOLICITUD
 }
