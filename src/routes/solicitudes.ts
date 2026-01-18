@@ -1,4 +1,5 @@
-// src/routes/solicitudes.ts
+//s rc/routes/solicitudes.ts
+
 import { Router, Response } from "express";
 import prisma from "../prisma";
 import { authenticateToken, AuthRequest } from "../middlewares/auth";
@@ -48,7 +49,8 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   console.log("📥 Recibiendo solicitud:", req.body);
 
   try {
-    const { bodegaId, items, solicitanteId: bodySolicitanteId } = req.body;
+    // Aceptamos 'tipo' en el body (DESPACHO por defecto si no viene)
+    const { bodegaId, items, solicitanteId: bodySolicitanteId, tipo = "DESPACHO" } = req.body;
     
     // 1. Identificar Usuario
     const user = req.user;
@@ -66,51 +68,58 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     const nuevaSolicitud = await prisma.$transaction(async (tx) => {
       
       // =======================================================
-      // A. VALIDACIÓN DE STOCK DISPONIBLE (FÍSICO - COMPROMETIDO) 🔒
+      // A. VALIDACIÓN DE STOCK DISPONIBLE
+      // SOLO si es DESPACHO validamos que haya stock.
+      // Si es DEVOLUCION (reingreso), no validamos stock porque vamos a sumar.
       // =======================================================
-      for (const item of items) {
-         // 1. Stock Físico (Entradas - Salidas)
-         const entradas = await tx.documento_item.aggregate({
-             _sum: { cantidad: true },
-             where: {
-                 productoid: item.productoId,
-                 documento: { tipo: "INGRESO", estado: "APROBADO" }
-             }
-         });
+      if (tipo === "DESPACHO") {
+        for (const item of items) {
+            // 1. Stock Físico (Entradas - Salidas + Ajustes)
+            const ingresos = await tx.documento_item.aggregate({
+                _sum: { cantidad: true },
+                where: { productoid: item.productoId, documento: { tipo: "INGRESO", estado: "APROBADO" } }
+            });
+            const salidas = await tx.documento_item.aggregate({
+                _sum: { cantidad: true },
+                where: { productoid: item.productoId, documento: { tipo: "SALIDA", estado: "APROBADO" } }
+            });
+            const ajustes = await tx.documento_item.aggregate({
+                _sum: { cantidad: true },
+                where: { productoid: item.productoId, documento: { tipo: "AJUSTE", estado: "APROBADO" } }
+            });
+            const devInternas = await tx.documento_item.aggregate({
+                _sum: { cantidad: true },
+                where: { productoid: item.productoId, documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } }
+            });
+            const devExternas = await tx.documento_item.aggregate({
+                _sum: { cantidad: true },
+                where: { productoid: item.productoId, documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } }
+            });
 
-         const salidas = await tx.documento_item.aggregate({
-            _sum: { cantidad: true },
-            where: {
-                productoid: item.productoId,
-                documento: { tipo: "SALIDA", estado: "APROBADO" }
-            }
-        });
+            const stockFisico = 
+                ((Number(ingresos._sum.cantidad) || 0) + (Number(devInternas._sum.cantidad) || 0) + (Number(ajustes._sum.cantidad) || 0)) - 
+                ((Number(salidas._sum.cantidad) || 0) + (Number(devExternas._sum.cantidad) || 0));
 
-        const stockFisico = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
-
-        // 2. Stock Comprometido (Solicitudes Pendientes o Aprobadas que "apartan" producto)
-        // No contamos RECHAZADA (obvio) ni ENTREGADA (porque esas ya generaron una Salida física y se restaron arriba)
-        const comprometido = await tx.solicitud_item.aggregate({
-            _sum: { cantidad: true },
-            where: {
-                productoid: item.productoId,
-                solicitud: {
-                    estado: { in: ["PENDIENTE", "APROBADA"] } 
+            // 2. Stock Comprometido (Solo DESPACHOS pendientes)
+            const comprometido = await tx.solicitud_item.aggregate({
+                _sum: { cantidad: true },
+                where: {
+                    productoid: item.productoId,
+                    solicitud: {
+                        estado: { in: ["PENDIENTE", "APROBADA"] },
+                        tipo: "DESPACHO" 
+                    }
                 }
+            });
+
+            const stockComprometido = Number(comprometido._sum.cantidad) || 0;
+            const disponibleReal = stockFisico - stockComprometido;
+            const cantidadSolicitada = Number(item.cantidad);
+
+            if (cantidadSolicitada > disponibleReal) {
+                const prodInfo = await tx.producto.findUnique({ where: { id: item.productoId } });
+                throw new Error(`Stock insuficiente para "${prodInfo?.nombre}". Físico: ${stockFisico}, Comprometido: ${stockComprometido}, Disponible: ${disponibleReal}`);
             }
-        });
-
-        const stockComprometido = Number(comprometido._sum.cantidad) || 0;
-        const disponibleReal = stockFisico - stockComprometido;
-        const cantidadSolicitada = Number(item.cantidad);
-
-        // Debug para ver qué está pasando en consola
-        console.log(`🔎 Prod: ${item.productoId} | Físico: ${stockFisico} | Apartado: ${stockComprometido} | Disp: ${disponibleReal}`);
-
-        // Si pide más de lo que realmente queda libre -> ERROR
-        if (cantidadSolicitada > disponibleReal) {
-            const prodInfo = await tx.producto.findUnique({ where: { id: item.productoId } });
-            throw new Error(`Stock insuficiente para "${prodInfo?.nombre}". Físico: ${stockFisico}, pero ${stockComprometido} ya están apartados. Disponibles: ${disponibleReal}`);
         }
       }
 
@@ -120,6 +129,8 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
       const anioActual = new Date().getFullYear();
       let nuevoCorrelativo = 1;
 
+      // Usamos el mismo consecutivo SOL para ambos tipos, o podrías crear uno DEV si prefieres
+      // Por ahora mantenemos SOL para simplificar
       const contador = await tx.consecutivo.findUnique({
           where: { tipo_anio: { tipo: "SOLICITUD", anio: anioActual } }
       });
@@ -146,7 +157,8 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
           solicitanteid: finalSolicitanteId,
           bodegaid: bodegaId,
           estado: "PENDIENTE",
-          fecha: new Date()
+          fecha: new Date(),
+          tipo: tipo // Guardamos si es DESPACHO o DEVOLUCION
         }
       });
 
@@ -222,7 +234,7 @@ router.get("/:id/export", async (req, res) => {
 
 // ===============================
 // POST /api/solicitudes/:id/entregar
-// (GENERACIÓN DE SALIDA AUTOMÁTICA)
+// (GENERACIÓN DE DOCUMENTO FINAL)
 // ===============================
 router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -234,7 +246,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
     }
 
     const resultado = await prisma.$transaction(async (tx) => {
-      // 1. Buscar la solicitud original
+      // 1. Buscar la solicitud original y ver su TIPO
       const solicitud = await tx.solicitud.findUnique({
         where: { id },
         include: { solicitud_item: true }
@@ -246,12 +258,21 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
           throw new Error(`La solicitud ya está en estado ${solicitud.estado} y no se puede procesar nuevamente.`);
       }
 
-      // 2. Generar Consecutivo Salida
+      // Determinar si es SALIDA (Despacho) o INGRESO por DEVOLUCIÓN (Devolución)
+      // Si tipo es DESPACHO -> Documento SALIDA
+      // Si tipo es DEVOLUCION -> Documento DEVOLUCION (Interna)
+      const esDespacho = solicitud.tipo === "DESPACHO";
+      const tipoDocumento = esDespacho ? "SALIDA" : "DEVOLUCION";
+
+      // 2. Generar Consecutivo
       const anioActual = new Date().getFullYear();
       let nuevoCorrelativo = 1;
+      
+      // Prefijo: SAL para salida, DEV para devolución
+      const prefijo = esDespacho ? "SAL" : "DEV";
 
       const contador = await tx.consecutivo.findUnique({
-          where: { tipo_anio: { tipo: "SALIDA", anio: anioActual } }
+          where: { tipo_anio: { tipo: tipoDocumento, anio: anioActual } }
       });
 
       if (contador) {
@@ -262,53 +283,48 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
           nuevoCorrelativo = actualizado.ultimo || 1;
       } else {
           await tx.consecutivo.create({
-              data: { tipo: "SALIDA", anio: anioActual, ultimo: 1, prefijo: "SAL" }
+              data: { tipo: tipoDocumento, anio: anioActual, ultimo: 1, prefijo }
           });
           nuevoCorrelativo = 1;
       }
       
-      const codigoDoc = `SAL-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
+      const codigoDoc = `${prefijo}-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
 
-      // 3. Crear el Documento de Salida
+      // 3. Crear el Documento Final
       const documento = await tx.documento.create({
         data: {
-          tipo: "SALIDA",
+          tipo: tipoDocumento,
           estado: "APROBADO",
           fecha: new Date(),
           creadorid: userId,
-          bodegaorigenid: solicitud.bodegaid,
+          bodegaorigenid: esDespacho ? solicitud.bodegaid : null,   // Salida: Tiene Origen
+          bodegadestinoid: !esDespacho ? solicitud.bodegaid : null, // Devolución: Tiene Destino (reingresa a la misma bodega)
           solicitanteid: solicitud.solicitanteid,
           consecutivo: codigoDoc,
-          observacion: `Generado automáticamente desde Solicitud ${solicitud.id}`
+          observacion: `Generado automáticamente desde Solicitud ${solicitud.id} (${solicitud.tipo})`
         }
       });
 
-      // 4. Copiar Items con VALIDACIÓN FINAL DE STOCK (Física)
-      // Nota: Aquí solo validamos FÍSICO porque al "Entregar" estamos convirtiendo "Comprometido" en "Salida Real".
-      // Es decir, estamos consumiendo nuestra propia reserva.
+      // 4. Copiar Items con VALIDACIÓN FINAL DE STOCK
       for (const item of solicitud.solicitud_item) {
         
-        const entradas = await tx.documento_item.aggregate({
-             _sum: { cantidad: true },
-             where: {
-                 productoid: item.productoid,
-                 documento: { tipo: "INGRESO", estado: "APROBADO" }
-             }
-         });
+        // Solo validamos stock si estamos SACANDO (Despacho).
+        // Si estamos devolviendo, no importa cuanto haya, solo sumamos.
+        if (esDespacho) {
+             const ingresos = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"INGRESO", estado:"APROBADO"}}});
+             const salidas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"SALIDA", estado:"APROBADO"}}});
+             const ajustes = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"AJUSTE", estado:"APROBADO"}}});
+             const devInternas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"DEVOLUCION", estado:"APROBADO", proveedorid:null}}});
+             const devExternas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"DEVOLUCION", estado:"APROBADO", NOT:{proveedorid:null}}}});
 
-         const salidas = await tx.documento_item.aggregate({
-            _sum: { cantidad: true },
-            where: {
-                productoid: item.productoid,
-                documento: { tipo: "SALIDA", estado: "APROBADO" }
+             const stockFisicoAlMomento = 
+                ((Number(ingresos._sum.cantidad)||0) + (Number(devInternas._sum.cantidad)||0) + (Number(ajustes._sum.cantidad)||0)) - 
+                ((Number(salidas._sum.cantidad)||0) + (Number(devExternas._sum.cantidad)||0));
+            
+            if (stockFisicoAlMomento < Number(item.cantidad)) {
+                const prod = await tx.producto.findUnique({ where: { id: item.productoid }, select: { nombre: true } });
+                throw new Error(`¡ALTO! Error crítico. Stock insuficiente para "${prod?.nombre}". Hay: ${stockFisicoAlMomento}, Necesitas: ${item.cantidad}`);
             }
-        });
-
-        const stockFisicoAlMomento = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
-        
-        if (stockFisicoAlMomento < Number(item.cantidad)) {
-            const prod = await tx.producto.findUnique({ where: { id: item.productoid }, select: { nombre: true } });
-            throw new Error(`¡ALTO! Error crítico. El stock FÍSICO es insuficiente para despachar "${prod?.nombre}". Hay: ${stockFisicoAlMomento}, Necesitas: ${item.cantidad}`);
         }
 
         await tx.documento_item.create({
@@ -327,7 +343,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
       const solicitudActualizada = await tx.solicitud.update({
         where: { id },
         data: {
-          estado: "ENTREGADA",
+          estado: "ENTREGADA", // O "COMPLETADA"
           aprobadorid: userId,
           documentosalidaid: documento.id
         }

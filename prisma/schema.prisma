@@ -199,6 +199,7 @@ model solicitud {
   aprobadorid                              String?
   documentosalidaid                        String?           @unique
   createdat                                DateTime?         @default(now()) @db.Timestamp(6)
+  tipo                                     tipo_solicitud    @default(DESPACHO)
   usuario_solicitud_aprobadoridTousuario   usuario?          @relation("solicitud_aprobadoridTousuario", fields: [aprobadorid], references: [id], onDelete: NoAction, onUpdate: NoAction)
   bodega                                   bodega?           @relation(fields: [bodegaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
   documento                                documento?        @relation(fields: [documentosalidaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -247,7 +248,7 @@ model usuario {
   id                                         String      @id @default(dbgenerated("gen_random_uuid()"))
   email                                      String      @unique
   nombre                                     String
-  password  String     @default("$2b$10$EpRnTzVlqHNP0.fUbXUwSOyuiXe/QLSUG6xNekdHgTGmrpHEfIoxm")
+  password                                   String      @default("$2b$10$EpRnTzVlqHNP0.fUbXUwSOyuiXe/QLSUG6xNekdHgTGmrpHEfIoxm")
   rol                                        rol?        @default(VISOR)
   activo                                     Boolean?    @default(true)
   createdat                                  DateTime?   @default(now()) @db.Timestamp(6)
@@ -290,4 +291,9 @@ enum tipo_documento {
   AJUSTE
   DEVOLUCION
   SOLICITUD
+}
+
+enum tipo_solicitud {
+  DESPACHO
+  DEVOLUCION
 }
