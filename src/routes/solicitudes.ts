@@ -42,7 +42,7 @@ router.get("/:id", async (req, res) => {
 
 // ===============================
 // POST /api/solicitudes
-// CREAR NUEVA SOLICITUD (CON VALIDACIÓN DE STOCK Y CONSECUTIVOS)
+// CREAR NUEVA SOLICITUD (CON VALIDACIÓN DE STOCK REAL + COMPROMETIDO)
 // ===============================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   console.log("📥 Recibiendo solicitud:", req.body);
@@ -66,10 +66,10 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     const nuevaSolicitud = await prisma.$transaction(async (tx) => {
       
       // =======================================================
-      // A. VALIDACIÓN DE STOCK (CANDADO DE SEGURIDAD) 🔒
+      // A. VALIDACIÓN DE STOCK DISPONIBLE (FÍSICO - COMPROMETIDO) 🔒
       // =======================================================
       for (const item of items) {
-         // Calcular entradas (Ingresos Aprobados)
+         // 1. Stock Físico (Entradas - Salidas)
          const entradas = await tx.documento_item.aggregate({
              _sum: { cantidad: true },
              where: {
@@ -78,7 +78,6 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
              }
          });
 
-         // Calcular salidas (Salidas Aprobadas)
          const salidas = await tx.documento_item.aggregate({
             _sum: { cantidad: true },
             where: {
@@ -87,26 +86,40 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
             }
         });
 
-        const totalEntradas = Number(entradas._sum.cantidad || 0);
-        const totalSalidas = Number(salidas._sum.cantidad || 0);
-        const stockActual = totalEntradas - totalSalidas;
+        const stockFisico = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+
+        // 2. Stock Comprometido (Solicitudes Pendientes o Aprobadas que "apartan" producto)
+        // No contamos RECHAZADA (obvio) ni ENTREGADA (porque esas ya generaron una Salida física y se restaron arriba)
+        const comprometido = await tx.solicitud_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: item.productoId,
+                solicitud: {
+                    estado: { in: ["PENDIENTE", "APROBADA"] } 
+                }
+            }
+        });
+
+        const stockComprometido = Number(comprometido._sum.cantidad) || 0;
+        const disponibleReal = stockFisico - stockComprometido;
         const cantidadSolicitada = Number(item.cantidad);
 
-        // Si pide más de lo que hay -> ERROR
-        if (cantidadSolicitada > stockActual) {
-            // Buscamos el nombre para dar un error amable
+        // Debug para ver qué está pasando en consola
+        console.log(`🔎 Prod: ${item.productoId} | Físico: ${stockFisico} | Apartado: ${stockComprometido} | Disp: ${disponibleReal}`);
+
+        // Si pide más de lo que realmente queda libre -> ERROR
+        if (cantidadSolicitada > disponibleReal) {
             const prodInfo = await tx.producto.findUnique({ where: { id: item.productoId } });
-            throw new Error(`Stock insuficiente para "${prodInfo?.nombre}". Disponible: ${stockActual}, Solicitado: ${cantidadSolicitada}`);
+            throw new Error(`Stock insuficiente para "${prodInfo?.nombre}". Físico: ${stockFisico}, pero ${stockComprometido} ya están apartados. Disponibles: ${disponibleReal}`);
         }
       }
 
       // =======================================================
-      // B. GENERACIÓN DE CÓDIGO (SOL-2026-XXXX) CON TABLA CONSECUTIVO
+      // B. GENERACIÓN DE CÓDIGO
       // =======================================================
       const anioActual = new Date().getFullYear();
       let nuevoCorrelativo = 1;
 
-      // Buscar o Crear contador para SOLICITUD
       const contador = await tx.consecutivo.findUnique({
           where: { tipo_anio: { tipo: "SOLICITUD", anio: anioActual } }
       });
@@ -129,11 +142,11 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
       // C. Crear Cabecera
       const solicitud = await tx.solicitud.create({
         data: {
-          id: codigoGenerado, // Usamos el código como ID (según tu esquema actual)
+          id: codigoGenerado,
           solicitanteid: finalSolicitanteId,
           bodegaid: bodegaId,
           estado: "PENDIENTE",
-          fecha: new Date() // Fecha y Hora exacta del servidor
+          fecha: new Date()
         }
       });
 
@@ -165,7 +178,6 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 
   } catch (error: any) {
     console.error("❌ Error al guardar solicitud:", error);
-    // Enviamos el mensaje de error (ej: Stock insuficiente) al frontend
     res.status(400).json({ message: error.message || "Error interno al guardar" });
   }
 });
@@ -229,9 +241,12 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
       });
 
       if (!solicitud) throw new Error("Solicitud no encontrada");
-      if (solicitud.estado !== "APROBADA") throw new Error("La solicitud debe estar APROBADA para poder entregarse.");
+      
+      if (solicitud.estado === "ENTREGADA" || solicitud.estado === "RECHAZADA") {
+          throw new Error(`La solicitud ya está en estado ${solicitud.estado} y no se puede procesar nuevamente.`);
+      }
 
-      // 2. Generar Consecutivo Salida (SAL-2026-XXXX) con tabla CONSECUTIVO
+      // 2. Generar Consecutivo Salida
       const anioActual = new Date().getFullYear();
       let nuevoCorrelativo = 1;
 
@@ -263,13 +278,39 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
           creadorid: userId,
           bodegaorigenid: solicitud.bodegaid,
           solicitanteid: solicitud.solicitanteid,
-          consecutivo: codigoDoc, // Guardamos el código bonito
+          consecutivo: codigoDoc,
           observacion: `Generado automáticamente desde Solicitud ${solicitud.id}`
         }
       });
 
-      // 4. Copiar Items
+      // 4. Copiar Items con VALIDACIÓN FINAL DE STOCK (Física)
+      // Nota: Aquí solo validamos FÍSICO porque al "Entregar" estamos convirtiendo "Comprometido" en "Salida Real".
+      // Es decir, estamos consumiendo nuestra propia reserva.
       for (const item of solicitud.solicitud_item) {
+        
+        const entradas = await tx.documento_item.aggregate({
+             _sum: { cantidad: true },
+             where: {
+                 productoid: item.productoid,
+                 documento: { tipo: "INGRESO", estado: "APROBADO" }
+             }
+         });
+
+         const salidas = await tx.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: item.productoid,
+                documento: { tipo: "SALIDA", estado: "APROBADO" }
+            }
+        });
+
+        const stockFisicoAlMomento = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+        
+        if (stockFisicoAlMomento < Number(item.cantidad)) {
+            const prod = await tx.producto.findUnique({ where: { id: item.productoid }, select: { nombre: true } });
+            throw new Error(`¡ALTO! Error crítico. El stock FÍSICO es insuficiente para despachar "${prod?.nombre}". Hay: ${stockFisicoAlMomento}, Necesitas: ${item.cantidad}`);
+        }
+
         await tx.documento_item.create({
           data: {
             documentoid: documento.id,
@@ -287,6 +328,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
         where: { id },
         data: {
           estado: "ENTREGADA",
+          aprobadorid: userId,
           documentosalidaid: documento.id
         }
       });
@@ -298,7 +340,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
 
   } catch (error: any) {
     console.error("Error en POST /api/solicitudes/:id/entregar:", error);
-    res.status(500).json({ message: error.message || "Error al procesar la entrega" });
+    res.status(400).json({ message: error.message || "Error al procesar la entrega" });
   }
 });
 

@@ -1,4 +1,3 @@
-// src/routes/catalogos.ts
 import { Router } from "express";
 import prisma from "../prisma";
 
@@ -9,11 +8,15 @@ const router = Router();
 // ===============================
 router.get("/bodegas", async (req, res) => {
   try {
+    // CORRECCIÓN: 'bodega' no tiene campo 'activo' en tu esquema.
+    // Traemos todas ordenadas por nombre.
     const bodegas = await prisma.bodega.findMany({
+      orderBy: { nombre: "asc" },
       select: { id: true, nombre: true } 
     });
     res.json(bodegas);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error al obtener bodegas" });
   }
 });
@@ -23,26 +26,46 @@ router.get("/bodegas", async (req, res) => {
 // ===============================
 router.get("/proveedores", async (req, res) => {
   try {
+    // CORRECCIÓN: 'proveedor' no tiene campo 'activo'.
     const proveedores = await prisma.proveedor.findMany({
+      orderBy: { nombre: "asc" },
       select: { id: true, nombre: true, nit: true }
     });
     res.json(proveedores);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error al obtener proveedores" });
   }
 });
 
 // ===============================
+// GET /api/catalogos/categorias
+// ===============================
+router.get("/categorias", async (req, res) => {
+  try {
+    const categorias = await prisma.categoria.findMany({
+      orderBy: { nombre: "asc" },
+      select: { id: true, nombre: true }
+    });
+    res.json(categorias);
+  } catch (error) {
+    res.status(500).json({ error: "Error al obtener categorías" });
+  }
+});
+
+// ===============================
 // GET /api/catalogos/productos-busqueda
-// (Autocompletado Rápido con Stock)
+// (Autocompletado Rápido con Stock REAL - COMPROMETIDO)
 // ===============================
 router.get("/productos-busqueda", async (req, res) => {
   try {
     const term = req.query.q as string;
     
-    // 1. Buscamos los productos (sin select específico, traemos lo básico)
+    // 1. Buscamos los productos
+    // 'producto' SÍ tiene campo 'activo' en tu esquema.
     const productosRaw = await prisma.producto.findMany({
       where: {
+        activo: true, 
         ...(term ? {
           OR: [
             { nombre: { contains: term, mode: 'insensitive' } },
@@ -56,9 +79,9 @@ router.get("/productos-busqueda", async (req, res) => {
       }
     });
 
-    // 2. Calculamos el stock para cada resultado
+    // 2. Calculamos el stock REAL (Físico - Comprometido)
     const productosConStock = await Promise.all(productosRaw.map(async (p) => {
-        // Sumar Entradas (Ingresos Aprobados)
+        // A. Stock Físico (Entradas - Salidas Reales)
         const entradas = await prisma.documento_item.aggregate({
             _sum: { cantidad: true },
             where: {
@@ -67,7 +90,6 @@ router.get("/productos-busqueda", async (req, res) => {
             }
         });
 
-        // Sumar Salidas (Salidas Aprobadas)
         const salidas = await prisma.documento_item.aggregate({
             _sum: { cantidad: true },
             where: {
@@ -76,7 +98,24 @@ router.get("/productos-busqueda", async (req, res) => {
             }
         });
 
-        const stock = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+        const fisico = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+
+        // B. Stock Comprometido (Solicitudes Pendientes/Aprobadas NO entregadas)
+        // OJO: No contamos ENTREGADA porque esa ya generó una SALIDA física (contada arriba).
+        const comprometido = await prisma.solicitud_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: p.id,
+                solicitud: {
+                    estado: { in: ["PENDIENTE", "APROBADA"] }
+                }
+            }
+        });
+        
+        const cantComprometida = Number(comprometido._sum.cantidad) || 0;
+        
+        // C. Disponible Real
+        const disponible = fisico - cantComprometida;
 
         return {
             id: p.id,
@@ -84,7 +123,7 @@ router.get("/productos-busqueda", async (req, res) => {
             codigo: p.codigo,
             precioref: p.precioref,
             unidad: p.unidad,
-            stockActual: stock // 👈 ¡EL DATO MÁGICO!
+            stockActual: disponible > 0 ? disponible : 0 // Si es negativo por error, mostramos 0
         };
     }));
 
@@ -101,16 +140,19 @@ router.get("/productos-busqueda", async (req, res) => {
 // ===============================
 router.get("/fincas-lotes", async (req, res) => {
   try {
+    // CORRECCIÓN: 'finca' no tiene campo 'activo'.
     const fincas = await prisma.finca.findMany({
+      orderBy: { nombre: "asc" },
       include: {
         lote: {
-          where: { estado: "ABIERTO" }, 
+          where: { estado: "ABIERTO" }, // 'lote' tiene estado enum ABIERTO/CERRADO
           select: { id: true, codigo: true, cultivo: { select: { nombre: true } } }
         }
       }
     });
     res.json(fincas);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error al obtener fincas y lotes" });
   }
 });
@@ -123,6 +165,7 @@ router.get("/productos/buscar", async (req, res) => {
   try {
     const q = (req.query.q as string) || ""; 
 
+    // 'producto' SÍ tiene campo 'activo'
     const productosRaw = await prisma.producto.findMany({
       where: {
         AND: [
@@ -139,11 +182,12 @@ router.get("/productos/buscar", async (req, res) => {
         unidad: true,
       },
       orderBy: { nombre: 'asc' },
-      take: 50 // Limitamos para no explotar el cálculo de stock si hay miles
+      take: 50 
     });
 
-    // Mismo cálculo de stock
+    // Mismo cálculo de stock (Físico - Comprometido)
     const productosConStock = await Promise.all(productosRaw.map(async (p) => {
+        // A. Físico
         const entradas = await prisma.documento_item.aggregate({
             _sum: { cantidad: true },
             where: { productoid: p.id, documento: { tipo: "INGRESO", estado: "APROBADO" } }
@@ -153,11 +197,25 @@ router.get("/productos/buscar", async (req, res) => {
             where: { productoid: p.id, documento: { tipo: "SALIDA", estado: "APROBADO" } }
         });
 
-        const stock = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+        const fisico = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+
+        // B. Comprometido
+        const comprometido = await prisma.solicitud_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: p.id,
+                solicitud: {
+                    estado: { in: ["PENDIENTE", "APROBADA"] }
+                }
+            }
+        });
+        
+        const cantComprometida = Number(comprometido._sum.cantidad) || 0;
+        const disponible = fisico - cantComprometida;
 
         return {
             ...p,
-            stockActual: stock
+            stockActual: disponible > 0 ? disponible : 0
         };
     }));
 
