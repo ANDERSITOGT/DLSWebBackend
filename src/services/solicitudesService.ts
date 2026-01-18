@@ -2,7 +2,6 @@
 import prisma from "../prisma";
 import PDFDocument from "pdfkit";
 
-// Definimos los tipos explícitamente para evitar errores
 export type EstadoSolicitud = "PENDIENTE" | "APROBADA" | "RECHAZADA" | "ENTREGADA";
 
 type CrearSolicitudProductoDTO = {
@@ -14,14 +13,16 @@ type CrearSolicitudProductoDTO = {
 };
 
 export type CrearSolicitudDTO = {
-  fecha?: string; // ISO
+  fecha?: string;
   solicitanteid: string;
   bodegaid?: string | null;
   productos: CrearSolicitudProductoDTO[];
+  tipo?: "DESPACHO" | "DEVOLUCION";
+  solicitudOrigenId?: string; // 👈 NUEVO CAMPO
 };
 
 // ===================================================
-// LISTA - Mis Solicitudes (LIMITADO A 50)
+// LISTA - Mis Solicitudes
 // ===================================================
 async function getSolicitudes(opciones: {
   estado?: EstadoSolicitud;
@@ -33,14 +34,25 @@ async function getSolicitudes(opciones: {
   if (estado) where.estado = estado;
   if (solicitanteId) where.solicitanteid = solicitanteId;
 
+  // 👇 FILTRO DE SEGURIDAD:
+  // Si estamos buscando historiales para devolver (generalmente ENTREGADA),
+  // debemos excluir las que YA TIENEN una devolución hija.
+  // Pero como este método se usa para la lista general, no podemos filtrar siempre.
+  // Haremos una carga inteligente: Traemos si tiene hijos o no.
+  
   const solicitudes = await prisma.solicitud.findMany({
     where,
     orderBy: { fecha: "desc" },
-    take: 50, // 👈 1. LÍMITE DE 50 SOLICITUDES
+    take: 50,
     include: {
       bodega: true,
       usuario_solicitud_solicitanteidTousuario: true,
       solicitud_item: true,
+      // Revisamos si esta solicitud ha sido origen de otra (tiene hijos)
+      other_solicitud: { 
+          where: { tipo: "DEVOLUCION" },
+          select: { id: true } 
+      }
     },
   });
 
@@ -49,9 +61,11 @@ async function getSolicitudes(opciones: {
     codigo: s.id,
     fecha: s.fecha,
     estado: s.estado as EstadoSolicitud,
+    tipo: (s as any).tipo || "DESPACHO",
     bodegaNombre: s.bodega?.nombre ?? "Sin Bodega",
     solicitanteNombre: s.usuario_solicitud_solicitanteidTousuario?.nombre ?? "Desconocido",
     totalProductos: s.solicitud_item.length,
+    yaDevuelta: s.other_solicitud && s.other_solicitud.length > 0 // 👈 Bandera clave
   }));
 }
 
@@ -68,7 +82,7 @@ async function getDetalleSolicitud(id: string) {
         include: {
           producto: true,
           unidad: true,
-          lote: true,
+          lote: { include: { cultivo: true } }, 
         },
       },
       documento: true,
@@ -84,6 +98,7 @@ async function getDetalleSolicitud(id: string) {
     codigo: solicitud.id,
     fecha: solicitud.fecha,
     estado: solicitud.estado as EstadoSolicitud,
+    tipo: (solicitud as any).tipo || "DESPACHO",
     solicitante: {
       id: solicitud.solicitanteid,
       nombre: solicitud.usuario_solicitud_solicitanteidTousuario?.nombre ?? "",
@@ -95,14 +110,17 @@ async function getDetalleSolicitud(id: string) {
         }
       : null,
     productos: solicitud.solicitud_item.map((d) => ({
-      id: d.id,
+      itemId: d.id,
       productoId: d.productoid,
+      productoObjId: d.producto?.id,
       nombre: d.producto?.nombre ?? "Producto eliminado",
       codigo: d.producto?.codigo ?? "---",
       cantidad: Number(d.cantidad), 
       unidad: d.unidad?.abreviatura ?? "",
       unidadNombre: d.unidad?.nombre ?? "",
-      loteCodigo: d.lote?.codigo ?? null,
+      loteId: d.loteid ?? null,
+      loteCodigo: d.lote?.codigo ?? "Sin Lote",
+      cultivo: d.lote?.cultivo?.nombre || "General",
       notas: d.notas ?? null,
     })),
     documentoSalidaId: solicitud.documentosalidaid ?? null,
@@ -111,15 +129,24 @@ async function getDetalleSolicitud(id: string) {
 }
 
 // ===================================================
-// CREAR SOLICITUD
+// CREAR SOLICITUD (CON VALIDACIÓN DE DUPLICADOS)
 // ===================================================
 async function crearSolicitud(input: CrearSolicitudDTO) {
-  const { fecha, solicitanteid, bodegaid, productos } = input;
+  const { fecha, solicitanteid, bodegaid, productos, tipo = "DESPACHO", solicitudOrigenId } = input;
+
+  // 🔒 VALIDACIÓN ESTRICTA: Una sola devolución por salida
+  if (tipo === "DEVOLUCION" && solicitudOrigenId) {
+      const yaExiste = await prisma.solicitud.findFirst({
+          where: { solicitud_origen_id: solicitudOrigenId }
+      });
+      if (yaExiste) {
+          throw new Error(`Error crítico: La solicitud ${solicitudOrigenId} ya tiene una devolución registrada (${yaExiste.id}). No se permiten duplicados.`);
+      }
+  }
 
   const baseDate = fecha ? new Date(fecha) : new Date();
   const year = baseDate.getFullYear();
 
-  // Lógica para generar ID consecutivo tipo SOL-2025-0001
   const countYear = await prisma.solicitud.count({
     where: {
       fecha: {
@@ -137,8 +164,10 @@ async function crearSolicitud(input: CrearSolicitudDTO) {
       id: codigo,
       fecha: baseDate,
       estado: "PENDIENTE",
+      tipo: tipo,
       solicitanteid,
       bodegaid: bodegaid ?? null,
+      solicitud_origen_id: solicitudOrigenId || null, // 👈 Guardamos la relación
       solicitud_item: {
         create: productos.map((p) => ({
           productoid: p.productoid,
@@ -154,83 +183,50 @@ async function crearSolicitud(input: CrearSolicitudDTO) {
   return getDetalleSolicitud(nueva.id);
 }
 
-// ===================================================
-// CAMBIAR ESTADO
-// ===================================================
-async function actualizarEstadoSolicitud(
-  id: string,
-  estado: EstadoSolicitud,
-  aprobadorId?: string | null 
-) {
+// ... (El resto de funciones actualizarEstadoSolicitud y exportSolicitudDetallePDF se mantienen IGUALES que antes)
+// Solo para ahorrar espacio no las repito, pero asegúrate de dejarlas en el archivo.
+
+async function actualizarEstadoSolicitud(id: string, estado: EstadoSolicitud, aprobadorId?: string | null) {
   const data: any = { estado };
-
-  if (aprobadorId) {
-    data.aprobadorid = aprobadorId;
-  }
-
-  const actualizada = await prisma.solicitud.update({
-    where: { id },
-    data,
-  });
-
+  if (aprobadorId) data.aprobadorid = aprobadorId;
+  const actualizada = await prisma.solicitud.update({ where: { id }, data });
   return getDetalleSolicitud(actualizada.id);
 }
 
-// ===================================================
-// EXPORTAR PDF
-// ===================================================
 async function exportSolicitudDetallePDF(id: string) {
   const detalle = await getDetalleSolicitud(id);
-
   const doc = new PDFDocument({ margin: 40, size: "A4" });
   const chunks: Buffer[] = [];
-
-  return await new Promise<{ filename: string; mime: string; content: Buffer }>(
-    (resolve, reject) => {
+  return await new Promise<{ filename: string; mime: string; content: Buffer }>((resolve, reject) => {
       doc.on("data", (chunk) => chunks.push(chunk as Buffer));
       doc.on("error", (err) => reject(err));
-      
       doc.on("end", () => {
         const buffer = Buffer.concat(chunks);
-        resolve({
-          filename: `${detalle.codigo}.pdf`,
-          mime: "application/pdf",
-          content: buffer
-        });
+        resolve({ filename: `${detalle.codigo}.pdf`, mime: "application/pdf", content: buffer });
       });
-
-      // --- Diseño del PDF ---
       doc.fontSize(18).text(`Solicitud ${detalle.codigo}`, { align: "left" });
+      doc.fontSize(10).text(`Tipo: ${detalle.tipo}`, { align: "left" });
       doc.moveDown(0.5);
-      
       doc.fontSize(10);
       doc.text(`Fecha: ${detalle.fecha?.toISOString().split('T')[0] ?? ""}`);
       doc.text(`Estado: ${detalle.estado}`);
-      
-      if (detalle.bodega) {
-        doc.text(`Bodega: ${detalle.bodega.nombre}`);
-      }
+      if (detalle.bodega) doc.text(`Bodega: ${detalle.bodega.nombre}`);
       doc.text(`Solicitante: ${detalle.solicitante.nombre}`);
-
       doc.moveDown(1);
       doc.fontSize(12).text("Productos Solicitados", { underline: true });
       doc.moveDown(0.5);
-      
       doc.fontSize(10);
       detalle.productos.forEach((p) => {
         const linea = `• ${p.nombre} (${p.codigo}) - ${p.cantidad} ${p.unidad}`;
-        const extra = p.loteCodigo ? ` | Lote: ${p.loteCodigo}` : "";
+        const extra = p.loteCodigo !== "Sin Lote" ? ` | Lote: ${p.loteCodigo} (${p.cultivo})` : "";
         const notas = p.notas ? ` | Nota: ${p.notas}` : "";
-        
         doc.text(linea + extra + notas);
       });
-
       doc.end();
     }
   );
 }
 
-// Exportación por defecto
 export default {
   getSolicitudes,
   getDetalleSolicitud,

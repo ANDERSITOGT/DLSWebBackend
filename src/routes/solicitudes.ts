@@ -1,4 +1,4 @@
-//s rc/routes/solicitudes.ts
+// src/routes/solicitudes.ts
 
 import { Router, Response } from "express";
 import prisma from "../prisma";
@@ -43,14 +43,13 @@ router.get("/:id", async (req, res) => {
 
 // ===============================
 // POST /api/solicitudes
-// CREAR NUEVA SOLICITUD (CON VALIDACIÓN DE STOCK REAL + COMPROMETIDO)
+// CREAR NUEVA SOLICITUD (CON VALIDACIÓN CORREGIDA)
 // ===============================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   console.log("📥 Recibiendo solicitud:", req.body);
 
   try {
-    // Aceptamos 'tipo' en el body (DESPACHO por defecto si no viene)
-    const { bodegaId, items, solicitanteId: bodySolicitanteId, tipo = "DESPACHO" } = req.body;
+    const { bodegaId, items, solicitanteId: bodySolicitanteId, tipo = "DESPACHO", solicitudOrigenId } = req.body;
     
     // 1. Identificar Usuario
     const user = req.user;
@@ -68,39 +67,40 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     const nuevaSolicitud = await prisma.$transaction(async (tx) => {
       
       // =======================================================
-      // A. VALIDACIÓN DE STOCK DISPONIBLE
-      // SOLO si es DESPACHO validamos que haya stock.
-      // Si es DEVOLUCION (reingreso), no validamos stock porque vamos a sumar.
+      // A. VALIDACIÓN DE UNICIDAD (CORREGIDA ✅)
+      // Si ya existe una devolución para este origen, PERO está RECHAZADA,
+      // permitimos crear una nueva. Solo bloqueamos si está Pendiente, Aprobada o Entregada.
+      // =======================================================
+      if (tipo === "DEVOLUCION" && solicitudOrigenId) {
+          const yaDevuelta = await tx.solicitud.findFirst({
+              where: { 
+                  solicitud_origen_id: solicitudOrigenId,
+                  estado: { not: "RECHAZADA" } // 👈 ¡ESTA ES LA CLAVE! Ignoramos las rechazadas.
+              }
+          });
+
+          if (yaDevuelta) {
+              throw new Error(`Error: La solicitud ${solicitudOrigenId} ya tiene una devolución activa (${yaDevuelta.id}). Si fue rechazada, verifica el estado.`);
+          }
+      }
+
+      // =======================================================
+      // B. VALIDACIÓN DE STOCK DISPONIBLE (SOLO PARA DESPACHOS)
       // =======================================================
       if (tipo === "DESPACHO") {
         for (const item of items) {
-            // 1. Stock Físico (Entradas - Salidas + Ajustes)
-            const ingresos = await tx.documento_item.aggregate({
-                _sum: { cantidad: true },
-                where: { productoid: item.productoId, documento: { tipo: "INGRESO", estado: "APROBADO" } }
-            });
-            const salidas = await tx.documento_item.aggregate({
-                _sum: { cantidad: true },
-                where: { productoid: item.productoId, documento: { tipo: "SALIDA", estado: "APROBADO" } }
-            });
-            const ajustes = await tx.documento_item.aggregate({
-                _sum: { cantidad: true },
-                where: { productoid: item.productoId, documento: { tipo: "AJUSTE", estado: "APROBADO" } }
-            });
-            const devInternas = await tx.documento_item.aggregate({
-                _sum: { cantidad: true },
-                where: { productoid: item.productoId, documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } }
-            });
-            const devExternas = await tx.documento_item.aggregate({
-                _sum: { cantidad: true },
-                where: { productoid: item.productoId, documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } }
-            });
+            // 1. Stock Físico
+            const ingresos = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "INGRESO", estado: "APROBADO" } } });
+            const salidas = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "SALIDA", estado: "APROBADO" } } });
+            const ajustes = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "AJUSTE", estado: "APROBADO" } } });
+            const devInternas = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } } });
+            const devExternas = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } } });
 
             const stockFisico = 
                 ((Number(ingresos._sum.cantidad) || 0) + (Number(devInternas._sum.cantidad) || 0) + (Number(ajustes._sum.cantidad) || 0)) - 
                 ((Number(salidas._sum.cantidad) || 0) + (Number(devExternas._sum.cantidad) || 0));
 
-            // 2. Stock Comprometido (Solo DESPACHOS pendientes)
+            // 2. Stock Comprometido
             const comprometido = await tx.solicitud_item.aggregate({
                 _sum: { cantidad: true },
                 where: {
@@ -124,13 +124,11 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
       }
 
       // =======================================================
-      // B. GENERACIÓN DE CÓDIGO
+      // C. GENERACIÓN DE CÓDIGO
       // =======================================================
       const anioActual = new Date().getFullYear();
       let nuevoCorrelativo = 1;
 
-      // Usamos el mismo consecutivo SOL para ambos tipos, o podrías crear uno DEV si prefieres
-      // Por ahora mantenemos SOL para simplificar
       const contador = await tx.consecutivo.findUnique({
           where: { tipo_anio: { tipo: "SOLICITUD", anio: anioActual } }
       });
@@ -150,7 +148,7 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 
       const codigoGenerado = `SOL-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
 
-      // C. Crear Cabecera
+      // D. Crear Cabecera
       const solicitud = await tx.solicitud.create({
         data: {
           id: codigoGenerado,
@@ -158,11 +156,12 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
           bodegaid: bodegaId,
           estado: "PENDIENTE",
           fecha: new Date(),
-          tipo: tipo // Guardamos si es DESPACHO o DEVOLUCION
+          tipo: tipo,
+          solicitud_origen_id: solicitudOrigenId || null 
         }
       });
 
-      // D. Crear Items
+      // E. Crear Items
       for (const item of items) {
         const prod = await tx.producto.findUnique({
               where: { id: item.productoId },
@@ -234,7 +233,6 @@ router.get("/:id/export", async (req, res) => {
 
 // ===============================
 // POST /api/solicitudes/:id/entregar
-// (GENERACIÓN DE DOCUMENTO FINAL)
 // ===============================
 router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -246,7 +244,6 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
     }
 
     const resultado = await prisma.$transaction(async (tx) => {
-      // 1. Buscar la solicitud original y ver su TIPO
       const solicitud = await tx.solicitud.findUnique({
         where: { id },
         include: { solicitud_item: true }
@@ -258,17 +255,12 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
           throw new Error(`La solicitud ya está en estado ${solicitud.estado} y no se puede procesar nuevamente.`);
       }
 
-      // Determinar si es SALIDA (Despacho) o INGRESO por DEVOLUCIÓN (Devolución)
-      // Si tipo es DESPACHO -> Documento SALIDA
-      // Si tipo es DEVOLUCION -> Documento DEVOLUCION (Interna)
       const esDespacho = solicitud.tipo === "DESPACHO";
       const tipoDocumento = esDespacho ? "SALIDA" : "DEVOLUCION";
 
-      // 2. Generar Consecutivo
+      // Consecutivo
       const anioActual = new Date().getFullYear();
       let nuevoCorrelativo = 1;
-      
-      // Prefijo: SAL para salida, DEV para devolución
       const prefijo = esDespacho ? "SAL" : "DEV";
 
       const contador = await tx.consecutivo.findUnique({
@@ -290,26 +282,23 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
       
       const codigoDoc = `${prefijo}-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
 
-      // 3. Crear el Documento Final
+      // Documento Final
       const documento = await tx.documento.create({
         data: {
           tipo: tipoDocumento,
           estado: "APROBADO",
           fecha: new Date(),
           creadorid: userId,
-          bodegaorigenid: esDespacho ? solicitud.bodegaid : null,   // Salida: Tiene Origen
-          bodegadestinoid: !esDespacho ? solicitud.bodegaid : null, // Devolución: Tiene Destino (reingresa a la misma bodega)
+          bodegaorigenid: esDespacho ? solicitud.bodegaid : null,   
+          bodegadestinoid: !esDespacho ? solicitud.bodegaid : null, 
           solicitanteid: solicitud.solicitanteid,
           consecutivo: codigoDoc,
           observacion: `Generado automáticamente desde Solicitud ${solicitud.id} (${solicitud.tipo})`
         }
       });
 
-      // 4. Copiar Items con VALIDACIÓN FINAL DE STOCK
+      // Items
       for (const item of solicitud.solicitud_item) {
-        
-        // Solo validamos stock si estamos SACANDO (Despacho).
-        // Si estamos devolviendo, no importa cuanto haya, solo sumamos.
         if (esDespacho) {
              const ingresos = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"INGRESO", estado:"APROBADO"}}});
              const salidas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"SALIDA", estado:"APROBADO"}}});
@@ -318,8 +307,8 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
              const devExternas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"DEVOLUCION", estado:"APROBADO", NOT:{proveedorid:null}}}});
 
              const stockFisicoAlMomento = 
-                ((Number(ingresos._sum.cantidad)||0) + (Number(devInternas._sum.cantidad)||0) + (Number(ajustes._sum.cantidad)||0)) - 
-                ((Number(salidas._sum.cantidad)||0) + (Number(devExternas._sum.cantidad)||0));
+               ((Number(ingresos._sum.cantidad)||0) + (Number(devInternas._sum.cantidad)||0) + (Number(ajustes._sum.cantidad)||0)) - 
+               ((Number(salidas._sum.cantidad)||0) + (Number(devExternas._sum.cantidad)||0));
             
             if (stockFisicoAlMomento < Number(item.cantidad)) {
                 const prod = await tx.producto.findUnique({ where: { id: item.productoid }, select: { nombre: true } });
@@ -339,11 +328,11 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
         });
       }
 
-      // 5. Actualizar Solicitud
+      // Actualizar Solicitud
       const solicitudActualizada = await tx.solicitud.update({
         where: { id },
         data: {
-          estado: "ENTREGADA", // O "COMPLETADA"
+          estado: "ENTREGADA",
           aprobadorid: userId,
           documentosalidaid: documento.id
         }

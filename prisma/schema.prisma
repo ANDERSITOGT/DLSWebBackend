@@ -200,11 +200,16 @@ model solicitud {
   documentosalidaid                        String?           @unique
   createdat                                DateTime?         @default(now()) @db.Timestamp(6)
   tipo                                     tipo_solicitud    @default(DESPACHO)
+  solicitud_origen_id                      String?
   usuario_solicitud_aprobadoridTousuario   usuario?          @relation("solicitud_aprobadoridTousuario", fields: [aprobadorid], references: [id], onDelete: NoAction, onUpdate: NoAction)
   bodega                                   bodega?           @relation(fields: [bodegaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
   documento                                documento?        @relation(fields: [documentosalidaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
   usuario_solicitud_solicitanteidTousuario usuario           @relation("solicitud_solicitanteidTousuario", fields: [solicitanteid], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  solicitud                                solicitud?        @relation("solicitudTosolicitud", fields: [solicitud_origen_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  other_solicitud                          solicitud[]       @relation("solicitudTosolicitud")
   solicitud_item                           solicitud_item[]
+
+  @@index([solicitud_origen_id], map: "idx_solicitud_origen")
 }
 
 model solicitud_item {
