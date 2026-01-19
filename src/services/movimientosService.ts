@@ -32,8 +32,8 @@ export type MovimientoResumenDTO = {
   destino: string | null;
   proveedor: string | null;
   productos: string;
-  fecha: string | null;     // Fecha Documento (Contable)
-  createdat?: string;       // 👈 NUEVO: Fecha Registro (Bitácora Real)
+  fecha: string | null;     
+  createdat?: string;       
 };
 
 export type ProductoEnMovimientoDTO = {
@@ -50,7 +50,7 @@ export type ProductoEnMovimientoDTO = {
 export type MovimientoDetalleDTO = {
   id: string;
   codigo: string;
-  consecutivo?: string; // Agregamos consecutivo aquí también por si acaso
+  consecutivo?: string; 
   tipo: MovimientoTipo;
   estado: MovimientoEstado;
   fecha: string | null;
@@ -99,41 +99,56 @@ export type LoteDetalleDTO = {
 export const movimientosService = {
   
   // ---------------------------------------
-  // LISTADO DE DOCUMENTOS / MOVIMIENTOS
+  // LISTADO DE DOCUMENTOS / MOVIMIENTOS (CON FILTRO BLINDADO 🛡️)
   // ---------------------------------------
-  async getListadoMovimientos(): Promise<MovimientoResumenDTO[]> {
-    const documentos = await prisma.documento.findMany({
-      // 👇 CAMBIO CLAVE: Ordenar por fecha de creación (Bitácora real)
-      orderBy: { createdat: "desc" },
-      take: 50,
-      include: {
-        proveedor: true,
-        bodega_documento_bodegaorigenidTobodega: true,
-        bodega_documento_bodegadestinoidTobodega: true,
-        documento_item: { select: { id: true } },
-      },
-    });
+  async getListadoMovimientos(usuario?: { id: string; rol: string }): Promise<MovimientoResumenDTO[]> {
+    
+    // 👇 CONSTRUIMOS EL FILTRO DINÁMICO
+    const where: any = {};
 
-    return documentos.map((d) => {
-      const origen = d.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
-      const destino = d.bodega_documento_bodegadestinoidTobodega?.nombre ?? null;
-      const proveedor = d.proveedor?.nombre ?? null;
-      const productosLabel = `${d.documento_item.length} productos`;
+    // 🛡️ LÓGICA DE SEGURIDAD
+    // Si existe usuario Y su rol es SOLICITANTE, filtramos por su ID.
+    // Si es ADMIN, BODEGUERO o undefined (por error), no filtramos.
+    if (usuario && usuario.rol === "SOLICITANTE") {
+        where.solicitanteid = usuario.id;
+    }
 
-      return {
-        id: d.id,
-        codigo: d.consecutivo ?? d.id,
-        tipo: d.tipo as MovimientoTipo,
-        estado: d.estado as MovimientoEstado,
-        origen,
-        destino,
-        proveedor,
-        productos: productosLabel,
-        fecha: d.fecha ? d.fecha.toISOString() : null,
-        // 👇 ENVIAMOS LA FECHA REAL DE REGISTRO AL FRONTEND
-        createdat: d.createdat ? d.createdat.toISOString() : undefined
-      };
-    });
+    try {
+        const documentos = await prisma.documento.findMany({
+          where, // 👈 APLICAMOS EL FILTRO
+          orderBy: { createdat: "desc" },
+          take: 50,
+          include: {
+            proveedor: true,
+            bodega_documento_bodegaorigenidTobodega: true,
+            bodega_documento_bodegadestinoidTobodega: true,
+            documento_item: { select: { id: true } },
+          },
+        });
+
+        return documentos.map((d) => {
+          const origen = d.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
+          const destino = d.bodega_documento_bodegadestinoidTobodega?.nombre ?? null;
+          const proveedor = d.proveedor?.nombre ?? null;
+          const productosLabel = `${d.documento_item.length} productos`;
+
+          return {
+            id: d.id,
+            codigo: d.consecutivo ?? d.id,
+            tipo: d.tipo as MovimientoTipo,
+            estado: d.estado as MovimientoEstado,
+            origen,
+            destino,
+            proveedor,
+            productos: productosLabel,
+            fecha: d.fecha ? d.fecha.toISOString() : null,
+            createdat: d.createdat ? d.createdat.toISOString() : undefined
+          };
+        });
+    } catch (error) {
+        console.error("Error en prisma.documento.findMany:", error);
+        throw error; // Re-lanzar para que el router lo capture
+    }
   },
 
   // ---------------------------------------
@@ -141,10 +156,7 @@ export const movimientosService = {
   // ---------------------------------------
   async getDetalleMovimiento(idOrCodigo: string): Promise<MovimientoDetalleDTO> {
     
-    // 1. Detectar si es UUID o Código Visual
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrCodigo);
-    
-    // 2. Construir el filtro dinámicamente
     const whereClause = isUuid ? { id: idOrCodigo } : { consecutivo: idOrCodigo };
 
     const doc = await prisma.documento.findFirst({

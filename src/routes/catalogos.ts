@@ -1,4 +1,5 @@
 // src/routes/catalogos.ts
+
 import { Router } from "express";
 import prisma from "../prisma";
 
@@ -10,10 +11,12 @@ const router = Router();
 router.get("/bodegas", async (req, res) => {
   try {
     const bodegas = await prisma.bodega.findMany({
+      orderBy: { nombre: "asc" },
       select: { id: true, nombre: true } 
     });
     res.json(bodegas);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error al obtener bodegas" });
   }
 });
@@ -24,25 +27,43 @@ router.get("/bodegas", async (req, res) => {
 router.get("/proveedores", async (req, res) => {
   try {
     const proveedores = await prisma.proveedor.findMany({
+      orderBy: { nombre: "asc" },
       select: { id: true, nombre: true, nit: true }
     });
     res.json(proveedores);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error al obtener proveedores" });
   }
 });
 
 // ===============================
+// GET /api/catalogos/categorias
+// ===============================
+router.get("/categorias", async (req, res) => {
+  try {
+    const categorias = await prisma.categoria.findMany({
+      orderBy: { nombre: "asc" },
+      select: { id: true, nombre: true }
+    });
+    res.json(categorias);
+  } catch (error) {
+    res.status(500).json({ error: "Error al obtener categorías" });
+  }
+});
+
+// ===============================
 // GET /api/catalogos/productos-busqueda
-// (Autocompletado Rápido con Stock)
+// (Autocompletado Rápido con Stock REAL - COMPROMETIDO)
 // ===============================
 router.get("/productos-busqueda", async (req, res) => {
   try {
     const term = req.query.q as string;
     
-    // 1. Buscamos los productos (sin select específico, traemos lo básico)
+    // 1. Buscamos los productos
     const productosRaw = await prisma.producto.findMany({
       where: {
+        activo: true, 
         ...(term ? {
           OR: [
             { nombre: { contains: term, mode: 'insensitive' } },
@@ -56,27 +77,72 @@ router.get("/productos-busqueda", async (req, res) => {
       }
     });
 
-    // 2. Calculamos el stock para cada resultado
+    // 2. Calculamos el stock REAL (Físico - Comprometido)
     const productosConStock = await Promise.all(productosRaw.map(async (p) => {
-        // Sumar Entradas (Ingresos Aprobados)
-        const entradas = await prisma.documento_item.aggregate({
+        // --- A. Stock Físico (Entradas - Salidas Reales + Ajustes) ---
+        
+        // 1. Ingresos (Suman)
+        const ingresos = await prisma.documento_item.aggregate({
             _sum: { cantidad: true },
-            where: {
-                productoid: p.id,
-                documento: { tipo: "INGRESO", estado: "APROBADO" }
-            }
+            where: { productoid: p.id, documento: { tipo: "INGRESO", estado: "APROBADO" } }
         });
 
-        // Sumar Salidas (Salidas Aprobadas)
+        // 2. Salidas (Restan)
         const salidas = await prisma.documento_item.aggregate({
             _sum: { cantidad: true },
-            where: {
-                productoid: p.id,
-                documento: { tipo: "SALIDA", estado: "APROBADO" }
+            where: { productoid: p.id, documento: { tipo: "SALIDA", estado: "APROBADO" } }
+        });
+
+        // 3. Ajustes (Suman o Restan según signo guardado)
+        const ajustes = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: { productoid: p.id, documento: { tipo: "AJUSTE", estado: "APROBADO" } }
+        });
+
+        // 4. Devoluciones Internas (Reingreso a Bodega -> SUMAN)
+        // Identificadas porque NO tienen proveedor
+        const devInternas = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: { 
+                productoid: p.id, 
+                documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } 
             }
         });
 
-        const stock = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+        // 5. Devoluciones Externas (Salida a Proveedor -> RESTAN)
+        // Identificadas porque SÍ tienen proveedor
+        const devExternas = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: { 
+                productoid: p.id, 
+                documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } 
+            }
+        });
+
+        const totalIngresos = (Number(ingresos._sum.cantidad) || 0) + (Number(devInternas._sum.cantidad) || 0);
+        const totalSalidas = (Number(salidas._sum.cantidad) || 0) + (Number(devExternas._sum.cantidad) || 0);
+        const totalAjustes = Number(ajustes._sum.cantidad) || 0; // Puede ser negativo
+
+        const stockFisico = totalIngresos - totalSalidas + totalAjustes;
+
+
+        // --- B. Stock Comprometido ---
+        // Solo contamos solicitudes de tipo DESPACHO. Las de DEVOLUCION no restan stock.
+        const comprometido = await prisma.solicitud_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: p.id,
+                solicitud: {
+                    estado: { in: ["PENDIENTE", "APROBADA"] },
+                    tipo: "DESPACHO" // <--- NUEVO FILTRO IMPORTANTE
+                }
+            }
+        });
+        
+        const cantComprometida = Number(comprometido._sum.cantidad) || 0;
+        
+        // C. Disponible Real
+        const disponible = stockFisico - cantComprometida;
 
         return {
             id: p.id,
@@ -84,7 +150,7 @@ router.get("/productos-busqueda", async (req, res) => {
             codigo: p.codigo,
             precioref: p.precioref,
             unidad: p.unidad,
-            stockActual: stock // 👈 ¡EL DATO MÁGICO!
+            stockActual: disponible > 0 ? disponible : 0
         };
     }));
 
@@ -102,15 +168,17 @@ router.get("/productos-busqueda", async (req, res) => {
 router.get("/fincas-lotes", async (req, res) => {
   try {
     const fincas = await prisma.finca.findMany({
+      orderBy: { nombre: "asc" },
       include: {
         lote: {
-          where: { estado: "ABIERTO" }, 
+          where: { estado: "ABIERTO" },
           select: { id: true, codigo: true, cultivo: { select: { nombre: true } } }
         }
       }
     });
     res.json(fincas);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error al obtener fincas y lotes" });
   }
 });
@@ -139,12 +207,13 @@ router.get("/productos/buscar", async (req, res) => {
         unidad: true,
       },
       orderBy: { nombre: 'asc' },
-      take: 50 // Limitamos para no explotar el cálculo de stock si hay miles
+      take: 50 
     });
 
-    // Mismo cálculo de stock
+    // Mismo cálculo de stock actualizado
     const productosConStock = await Promise.all(productosRaw.map(async (p) => {
-        const entradas = await prisma.documento_item.aggregate({
+        // A. Físico
+        const ingresos = await prisma.documento_item.aggregate({
             _sum: { cantidad: true },
             where: { productoid: p.id, documento: { tipo: "INGRESO", estado: "APROBADO" } }
         });
@@ -152,12 +221,43 @@ router.get("/productos/buscar", async (req, res) => {
             _sum: { cantidad: true },
             where: { productoid: p.id, documento: { tipo: "SALIDA", estado: "APROBADO" } }
         });
+        const ajustes = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: { productoid: p.id, documento: { tipo: "AJUSTE", estado: "APROBADO" } }
+        });
+        const devInternas = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: { productoid: p.id, documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } }
+        });
+        const devExternas = await prisma.documento_item.aggregate({
+            _sum: { cantidad: true },
+            where: { productoid: p.id, documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } }
+        });
 
-        const stock = (Number(entradas._sum.cantidad) || 0) - (Number(salidas._sum.cantidad) || 0);
+        const totalIngresos = (Number(ingresos._sum.cantidad) || 0) + (Number(devInternas._sum.cantidad) || 0);
+        const totalSalidas = (Number(salidas._sum.cantidad) || 0) + (Number(devExternas._sum.cantidad) || 0);
+        const totalAjustes = Number(ajustes._sum.cantidad) || 0;
+
+        const stockFisico = totalIngresos - totalSalidas + totalAjustes;
+
+        // B. Comprometido (Solo DESPACHO)
+        const comprometido = await prisma.solicitud_item.aggregate({
+            _sum: { cantidad: true },
+            where: {
+                productoid: p.id,
+                solicitud: {
+                    estado: { in: ["PENDIENTE", "APROBADA"] },
+                    tipo: "DESPACHO"
+                }
+            }
+        });
+        
+        const cantComprometida = Number(comprometido._sum.cantidad) || 0;
+        const disponible = stockFisico - cantComprometida;
 
         return {
             ...p,
-            stockActual: stock
+            stockActual: disponible > 0 ? disponible : 0
         };
     }));
 

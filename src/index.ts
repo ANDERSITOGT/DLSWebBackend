@@ -10,6 +10,7 @@ import solicitudesRouter from "./routes/solicitudes";
 import authRouter from "./routes/auth";
 import movimientosRouter from "./routes/movimientos"; 
 import catalogosRouter from "./routes/catalogos";
+import usuariosRoutes from "./routes/usuarios";
 
 dotenv.config();
 
@@ -30,6 +31,7 @@ app.use("/api/categorias", categoriasRouter);
 app.use("/api/solicitudes", solicitudesRouter);
 app.use("/api/movimientos", movimientosRouter);
 app.use("/api/catalogos", catalogosRouter);
+app.use("/api/usuarios", usuariosRoutes);
 
 // Health check (Útil para que Railway sepa que tu app vive)
 app.get("/api/health", async (_req, res) => {
