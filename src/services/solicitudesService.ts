@@ -1,4 +1,3 @@
-// src/services/solicitudesService.ts
 import prisma from "../prisma";
 import PDFDocument from "pdfkit";
 
@@ -18,28 +17,28 @@ export type CrearSolicitudDTO = {
   bodegaid?: string | null;
   productos: CrearSolicitudProductoDTO[];
   tipo?: "DESPACHO" | "DEVOLUCION";
-  solicitudOrigenId?: string; // 👈 NUEVO CAMPO
+  solicitudOrigenId?: string; 
 };
 
 // ===================================================
-// LISTA - Mis Solicitudes
+// LISTA - Mis Solicitudes (CORREGIDA)
 // ===================================================
 async function getSolicitudes(opciones: {
   estado?: EstadoSolicitud;
-  solicitanteId?: string;
+  usuario?: { id: string; rol: string };
+  tipo?: "DESPACHO" | "DEVOLUCION"; 
 }) {
-  const { estado, solicitanteId } = opciones;
+  const { estado, usuario, tipo } = opciones;
   const where: any = {};
 
   if (estado) where.estado = estado;
-  if (solicitanteId) where.solicitanteid = solicitanteId;
+  if (tipo) where.tipo = tipo;
 
-  // 👇 FILTRO DE SEGURIDAD:
-  // Si estamos buscando historiales para devolver (generalmente ENTREGADA),
-  // debemos excluir las que YA TIENEN una devolución hija.
-  // Pero como este método se usa para la lista general, no podemos filtrar siempre.
-  // Haremos una carga inteligente: Traemos si tiene hijos o no.
-  
+  // 🛡️ LÓGICA DE SEGURIDAD
+  if (usuario?.rol === "SOLICITANTE") {
+      where.solicitanteid = usuario.id;
+  }
+
   const solicitudes = await prisma.solicitud.findMany({
     where,
     orderBy: { fecha: "desc" },
@@ -48,9 +47,15 @@ async function getSolicitudes(opciones: {
       bodega: true,
       usuario_solicitud_solicitanteidTousuario: true,
       solicitud_item: true,
-      // Revisamos si esta solicitud ha sido origen de otra (tiene hijos)
+      
+      // 👇 CORRECCIÓN AQUÍ:
+      // Buscamos si tiene hijos devoluciones, PERO ignoramos las rechazadas.
+      // Si tiene una devolución rechazada, es como si no tuviera ninguna (se puede reintentar).
       other_solicitud: { 
-          where: { tipo: "DEVOLUCION" },
+          where: { 
+            tipo: "DEVOLUCION",
+            estado: { not: "RECHAZADA" } // 👈 ESTA LÍNEA ES LA MAGIA
+          },
           select: { id: true } 
       }
     },
@@ -65,7 +70,7 @@ async function getSolicitudes(opciones: {
     bodegaNombre: s.bodega?.nombre ?? "Sin Bodega",
     solicitanteNombre: s.usuario_solicitud_solicitanteidTousuario?.nombre ?? "Desconocido",
     totalProductos: s.solicitud_item.length,
-    yaDevuelta: s.other_solicitud && s.other_solicitud.length > 0 // 👈 Bandera clave
+    yaDevuelta: s.other_solicitud && s.other_solicitud.length > 0 
   }));
 }
 
@@ -129,18 +134,21 @@ async function getDetalleSolicitud(id: string) {
 }
 
 // ===================================================
-// CREAR SOLICITUD (CON VALIDACIÓN DE DUPLICADOS)
+// CREAR SOLICITUD
 // ===================================================
 async function crearSolicitud(input: CrearSolicitudDTO) {
   const { fecha, solicitanteid, bodegaid, productos, tipo = "DESPACHO", solicitudOrigenId } = input;
 
-  // 🔒 VALIDACIÓN ESTRICTA: Una sola devolución por salida
+  // 🔒 VALIDACIÓN ESTRICTA: Una sola devolución activa por salida
   if (tipo === "DEVOLUCION" && solicitudOrigenId) {
       const yaExiste = await prisma.solicitud.findFirst({
-          where: { solicitud_origen_id: solicitudOrigenId }
+          where: { 
+            solicitud_origen_id: solicitudOrigenId,
+            estado: { not: "RECHAZADA" } // Tambien validamos aqui por seguridad
+          }
       });
       if (yaExiste) {
-          throw new Error(`Error crítico: La solicitud ${solicitudOrigenId} ya tiene una devolución registrada (${yaExiste.id}). No se permiten duplicados.`);
+          throw new Error(`Error crítico: La solicitud ${solicitudOrigenId} ya tiene una devolución activa (${yaExiste.id}).`);
       }
   }
 
@@ -167,7 +175,7 @@ async function crearSolicitud(input: CrearSolicitudDTO) {
       tipo: tipo,
       solicitanteid,
       bodegaid: bodegaid ?? null,
-      solicitud_origen_id: solicitudOrigenId || null, // 👈 Guardamos la relación
+      solicitud_origen_id: solicitudOrigenId || null, 
       solicitud_item: {
         create: productos.map((p) => ({
           productoid: p.productoid,
@@ -183,9 +191,9 @@ async function crearSolicitud(input: CrearSolicitudDTO) {
   return getDetalleSolicitud(nueva.id);
 }
 
-// ... (El resto de funciones actualizarEstadoSolicitud y exportSolicitudDetallePDF se mantienen IGUALES que antes)
-// Solo para ahorrar espacio no las repito, pero asegúrate de dejarlas en el archivo.
-
+// ===================================================
+// ACTUALIZAR ESTADO
+// ===================================================
 async function actualizarEstadoSolicitud(id: string, estado: EstadoSolicitud, aprobadorId?: string | null) {
   const data: any = { estado };
   if (aprobadorId) data.aprobadorid = aprobadorId;
@@ -193,6 +201,9 @@ async function actualizarEstadoSolicitud(id: string, estado: EstadoSolicitud, ap
   return getDetalleSolicitud(actualizada.id);
 }
 
+// ===================================================
+// EXPORTAR PDF
+// ===================================================
 async function exportSolicitudDetallePDF(id: string) {
   const detalle = await getDetalleSolicitud(id);
   const doc = new PDFDocument({ margin: 40, size: "A4" });
