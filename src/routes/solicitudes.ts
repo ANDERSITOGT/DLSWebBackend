@@ -7,17 +7,15 @@ const router = Router();
 
 // ===============================
 // GET /api/solicitudes
+// Listar (Usa Servicio)
 // ===============================
 router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    // 👇 1. CAMBIO: Ahora capturamos también 'tipo' de la URL
     const { estado, tipo } = req.query;
-    
     const usuario = req.user; 
 
     const data = await solicitudesService.getSolicitudes({
       estado: estado as any,
-      // 👇 2. CAMBIO: Pasamos el tipo al servicio
       tipo: tipo as any, 
       usuario: usuario ? { id: usuario.id, rol: usuario.rol } : undefined,
     });
@@ -31,6 +29,7 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 
 // ===============================
 // GET /api/solicitudes/:id
+// Detalle (Usa Servicio)
 // ===============================
 router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -51,131 +50,20 @@ router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) =>
 
 // ===============================
 // POST /api/solicitudes
+// Crear (Usa Servicio - Lógica Refactorizada)
 // ===============================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   console.log("📥 Recibiendo solicitud:", req.body);
 
   try {
-    const { bodegaId, items, solicitanteId: bodySolicitanteId, tipo = "DESPACHO", solicitudOrigenId } = req.body;
-    
     const user = req.user;
-    const finalSolicitanteId = user?.id ?? bodySolicitanteId;
+    if (!user) return res.status(401).json({ message: "Usuario no autenticado" });
 
-    if (!finalSolicitanteId) {
-        return res.status(400).json({ message: "No se identificó al solicitante (Error de sesión)" });
-    }
-    
-    if (!bodegaId || !items || items.length === 0) {
-        return res.status(400).json({ message: "Faltan datos obligatorios (bodega o items)." });
-    }
-
-    const nuevaSolicitud = await prisma.$transaction(async (tx) => {
-      
-      // Validación Unicidad Devolución
-      if (tipo === "DEVOLUCION" && solicitudOrigenId) {
-          const yaDevuelta = await tx.solicitud.findFirst({
-              where: { 
-                  solicitud_origen_id: solicitudOrigenId,
-                  estado: { not: "RECHAZADA" } 
-              }
-          });
-
-          if (yaDevuelta) {
-              throw new Error(`Error: La solicitud ${solicitudOrigenId} ya tiene una devolución activa (${yaDevuelta.id}).`);
-          }
-      }
-
-      // Validación Stock (Solo Despacho)
-      if (tipo === "DESPACHO") {
-        for (const item of items) {
-            const ingresos = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "INGRESO", estado: "APROBADO" } } });
-            const salidas = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "SALIDA", estado: "APROBADO" } } });
-            const ajustes = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "AJUSTE", estado: "APROBADO" } } });
-            const devInternas = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } } });
-            const devExternas = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoId, documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } } });
-
-            const stockFisico = 
-                ((Number(ingresos._sum.cantidad) || 0) + (Number(devInternas._sum.cantidad) || 0) + (Number(ajustes._sum.cantidad) || 0)) - 
-                ((Number(salidas._sum.cantidad) || 0) + (Number(devExternas._sum.cantidad) || 0));
-
-            const comprometido = await tx.solicitud_item.aggregate({
-                _sum: { cantidad: true },
-                where: {
-                    productoid: item.productoId,
-                    solicitud: {
-                        estado: { in: ["PENDIENTE", "APROBADA"] },
-                        tipo: "DESPACHO" 
-                    }
-                }
-            });
-
-            const stockComprometido = Number(comprometido._sum.cantidad) || 0;
-            const disponibleReal = stockFisico - stockComprometido;
-            const cantidadSolicitada = Number(item.cantidad);
-
-            if (cantidadSolicitada > disponibleReal) {
-                const prodInfo = await tx.producto.findUnique({ where: { id: item.productoId } });
-                throw new Error(`Stock insuficiente para "${prodInfo?.nombre}". Físico: ${stockFisico}, Comprometido: ${stockComprometido}, Disponible: ${disponibleReal}`);
-            }
-        }
-      }
-
-      // Consecutivo
-      const anioActual = new Date().getFullYear();
-      let nuevoCorrelativo = 1;
-
-      const contador = await tx.consecutivo.findUnique({
-          where: { tipo_anio: { tipo: "SOLICITUD", anio: anioActual } }
-      });
-
-      if (contador) {
-          const actualizado = await tx.consecutivo.update({
-              where: { id: contador.id },
-              data: { ultimo: { increment: 1 } }
-          });
-          nuevoCorrelativo = actualizado.ultimo || 1;
-      } else {
-          await tx.consecutivo.create({
-              data: { tipo: "SOLICITUD", anio: anioActual, ultimo: 1, prefijo: "SOL" }
-          });
-          nuevoCorrelativo = 1;
-      }
-
-      const codigoGenerado = `SOL-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
-
-      const solicitud = await tx.solicitud.create({
-        data: {
-          id: codigoGenerado,
-          solicitanteid: finalSolicitanteId,
-          bodegaid: bodegaId,
-          estado: "PENDIENTE",
-          fecha: new Date(),
-          tipo: tipo,
-          solicitud_origen_id: solicitudOrigenId || null 
-        }
-      });
-
-      for (const item of items) {
-        const prod = await tx.producto.findUnique({
-              where: { id: item.productoId },
-              select: { unidadid: true }
-        });
-
-        if (!prod) throw new Error(`Producto ${item.productoId} no encontrado`);
-
-        await tx.solicitud_item.create({
-          data: {
-            solicitudid: solicitud.id,
-            productoid: item.productoId,
-            cantidad: item.cantidad,
-            unidadid: prod.unidadid,
-            notas: item.notas || null,
-            loteid: item.loteId || null 
-          }
-        });
-      }
-      return solicitud;
-    });
+    // Delegamos la validación y creación al servicio
+    const nuevaSolicitud = await solicitudesService.crearSolicitud({
+        ...req.body,
+        solicitanteid: req.body.solicitanteId 
+    }, { id: user.id, rol: user.rol });
 
     console.log("✅ Solicitud creada:", nuevaSolicitud.id);
     res.status(201).json({ ok: true, solicitud: nuevaSolicitud });
@@ -187,7 +75,8 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 });
 
 // ===============================
-// PATCH ESTADO
+// PATCH /:id/estado
+// Cambiar Estado (Usa Servicio)
 // ===============================
 router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -195,11 +84,7 @@ router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Res
     const { estado } = req.body; 
     const aprobadorId = req.user?.id; 
 
-    const data = await solicitudesService.actualizarEstadoSolicitud(
-      id,
-      estado,
-      aprobadorId 
-    );
+    const data = await solicitudesService.actualizarEstadoSolicitud(id, estado, aprobadorId);
     res.json(data);
   } catch (error) {
     console.error("Error en PATCH /api/solicitudes/:id/estado:", error);
@@ -208,7 +93,8 @@ router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Res
 });
 
 // ===============================
-// EXPORTAR
+// GET /:id/export
+// PDF (Usa Servicio)
 // ===============================
 router.get("/:id/export", async (req, res) => {
   try {
@@ -225,7 +111,9 @@ router.get("/:id/export", async (req, res) => {
 });
 
 // ===============================
-// ENTREGAR (GENERAR SALIDA/DEVOLUCION)
+// POST /:id/entregar
+// Generar Documento de Salida/Devolución
+// (MANTENEMOS ESTA LÓGICA AQUÍ POR AHORA)
 // ===============================
 router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -237,6 +125,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
     }
 
     const resultado = await prisma.$transaction(async (tx) => {
+      // 1. Obtener solicitud
       const solicitud = await tx.solicitud.findUnique({
         where: { id },
         include: { solicitud_item: true }
@@ -251,7 +140,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
       const esDespacho = solicitud.tipo === "DESPACHO";
       const tipoDocumento = esDespacho ? "SALIDA" : "DEVOLUCION";
 
-      // Consecutivo Documento
+      // 2. Consecutivo Documento
       const anioActual = new Date().getFullYear();
       let nuevoCorrelativo = 1;
       const prefijo = esDespacho ? "SAL" : "DEV";
@@ -275,7 +164,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
       
       const codigoDoc = `${prefijo}-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
 
-      // Documento Final
+      // 3. Crear Documento Final
       const documento = await tx.documento.create({
         data: {
           tipo: tipoDocumento,
@@ -290,10 +179,9 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
         }
       });
 
-      // Items Documento
+      // 4. Mover Items y Validar Stock Final
       for (const item of solicitud.solicitud_item) {
         if (esDespacho) {
-             // ... Validación de Stock igual que antes ...
              const ingresos = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"INGRESO", estado:"APROBADO"}}});
              const salidas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"SALIDA", estado:"APROBADO"}}});
              const ajustes = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"AJUSTE", estado:"APROBADO"}}});
@@ -306,7 +194,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
             
             if (stockFisicoAlMomento < Number(item.cantidad)) {
                 const prod = await tx.producto.findUnique({ where: { id: item.productoid }, select: { nombre: true } });
-                throw new Error(`¡ALTO! Error crítico. Stock insuficiente para "${prod?.nombre}". Hay: ${stockFisicoAlMomento}, Necesitas: ${item.cantidad}`);
+                throw new Error(`¡ALTO! Stock insuficiente para procesar entrega de "${prod?.nombre}". Hay: ${stockFisicoAlMomento}, Necesitas: ${item.cantidad}`);
             }
         }
 
@@ -322,7 +210,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
         });
       }
 
-      // Actualizar Estado Solicitud
+      // 5. Actualizar Estado Solicitud
       const solicitudActualizada = await tx.solicitud.update({
         where: { id },
         data: {

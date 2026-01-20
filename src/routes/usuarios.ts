@@ -2,12 +2,13 @@ import { Router, Response } from "express";
 import prisma from "../prisma";
 import bcrypt from "bcrypt"; 
 import { authenticateToken, AuthRequest } from "../middlewares/auth";
+import usuariosService from "../services/usuariosService"; // 👈 IMPORTANTE: El nuevo servicio
 
 const router = Router();
 
 // ==========================================
-// 🔐 RE-AUTENTICACIÓN (NUEVO)
-// Verifica password sin generar token, solo para dar paso
+// 🔐 RE-AUTENTICACIÓN
+// Verifica password sin generar token, solo para dar paso a acciones sensibles
 // ==========================================
 router.post("/verificar-acceso", authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
@@ -49,7 +50,7 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
         nombre: true,
         email: true,
         rol: true,
-        activo: true, // 👈 Importante traer este dato
+        activo: true, 
         createdat: true, 
       },
       orderBy: { createdat: "desc" }
@@ -155,6 +156,46 @@ router.patch("/:id/reset-password", authenticateToken, async (req: AuthRequest, 
 
     } catch (error) {
         res.status(500).json({ message: "Error al actualizar contraseña." });
+    }
+});
+
+// ==========================================
+// 🆕 GET /api/usuarios/solicitantes-asignacion
+// Obtener solicitantes con sus lotes (Para la nueva pantalla)
+// ==========================================
+router.get("/solicitantes-asignacion", authenticateToken, async (req: AuthRequest, res: Response) => {
+    try {
+        if (req.user?.rol !== "ADMIN") return res.status(403).json({ message: "Acceso denegado" });
+        
+        const data = await usuariosService.getSolicitantesConLotes();
+        res.json(data);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Error al obtener solicitantes" });
+    }
+});
+
+// ==========================================
+// 🆕 POST /api/usuarios/:id/asignar-lotes
+// Guardar los lotes seleccionados para un usuario
+// ==========================================
+router.post("/:id/asignar-lotes", authenticateToken, async (req: AuthRequest, res: Response) => {
+    try {
+        if (req.user?.rol !== "ADMIN") return res.status(403).json({ message: "Acceso denegado" });
+
+        const { id } = req.params;
+        const { lotesIds } = req.body; // Esperamos un array de IDs: ["uuid-1", "uuid-2"]
+
+        if (!Array.isArray(lotesIds)) {
+            return res.status(400).json({ message: "El formato de lotesIds es incorrecto." });
+        }
+
+        await usuariosService.actualizarAsignacionLotes(id, lotesIds);
+
+        res.json({ ok: true, message: "Asignación actualizada correctamente" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Error al guardar asignaciones" });
     }
 });
 
