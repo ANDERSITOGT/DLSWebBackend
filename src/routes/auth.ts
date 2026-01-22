@@ -1,4 +1,3 @@
-// src/routes/auth.ts
 import { Router } from "express";
 import prisma from "../prisma";
 import bcrypt from "bcrypt";
@@ -10,7 +9,6 @@ const router = Router();
 // POST /api/auth/login
 // Recibe: { email, password }
 // Devuelve: { user, token }
-//
 // ==========================================
 router.post("/login", async (req, res) => {
   try {
@@ -25,13 +23,12 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Credenciales inválidas" });
     }
 
-    // 2. Verificar si está activo
+    // 2. Verificar si está activo (Primer filtro al entrar)
     if (!usuario.activo) {
-      return res.status(403).json({ message: "Usuario inactivo" });
+      return res.status(403).json({ message: "Usuario inactivo. Contacte al administrador." });
     }
 
-    // 3. Verificar contraseña (usando bcrypt)
-    // Comparamos lo que escribió el usuario con el hash de la BD
+    // 3. Verificar contraseña
     const passwordValida = await bcrypt.compare(password, usuario.password);
 
     if (!passwordValida) {
@@ -39,7 +36,9 @@ router.post("/login", async (req, res) => {
     }
 
     // 4. Generar Token JWT
+    // NOTA: Asegúrate de que este secret sea EL MISMO en auth.ts (middleware)
     const secret = process.env.JWT_SECRET || "secreto_por_defecto";
+    
     const token = jwt.sign(
       {
         id: usuario.id,
@@ -48,10 +47,10 @@ router.post("/login", async (req, res) => {
         rol: usuario.rol,
       },
       secret,
-      { expiresIn: "8h" } // El token dura 8 horas
+      { expiresIn: "15d" } // 👈 CAMBIO: Ahora dura 15 días
     );
 
-    // 5. Responder (Omitimos devolver el password)
+    // 5. Responder
     res.json({
       token,
       user: {
@@ -67,9 +66,5 @@ router.post("/login", async (req, res) => {
     res.status(500).json({ message: "Error interno del servidor" });
   }
 });
-
-
-
-
 
 export default router;

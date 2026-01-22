@@ -1,32 +1,51 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import prisma from '../prisma'; // 👈 Necesitamos importar Prisma aquí
 
-// Extendemos la interfaz de Request para que TypeScript sepa que 'user' existe
 export interface AuthRequest extends Request {
   user?: any;
 }
 
 export const authenticateToken = (req: Request, res: Response, next: NextFunction) => {
-  // 1. Buscamos el token en la cabecera "Authorization: Bearer <token>"
+  // 1. Buscamos el token en la cabecera
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
-  // 2. Si no hay token, prohibido pasar (401)
   if (!token) {
     return res.status(401).json({ message: 'Acceso denegado: Token no proporcionado' });
   }
 
-  // 3. Verificamos si el token es real
-  // IMPORTANTE: Asegúrate que este 'secret' sea el mismo que usaste en tu Login
-  const secret = process.env.JWT_SECRET || "secreto_super_seguro"; 
+  const secret = process.env.JWT_SECRET || "secreto_por_defecto"; 
 
-  jwt.verify(token, secret, (err, user) => {
+  // 2. Verificamos la firma del token
+  jwt.verify(token, secret, async (err: any, decoded: any) => {
     if (err) {
+      // Si el token expiró (pasaron los 15 días) o es falso
       return res.status(403).json({ message: 'Token inválido o expirado' });
     }
-    
-    // 4. Si todo bien, guardamos los datos del usuario en la petición y dejamos pasar
-    (req as AuthRequest).user = user;
-    next();
+
+    try {
+        // 3. DOBLE VERIFICACIÓN (KILL SWITCH) 🛡️
+        // Buscamos al usuario en la BD para ver si sigue activo
+        const usuarioActual = await prisma.usuario.findUnique({
+            where: { id: decoded.id },
+            select: { id: true, rol: true, activo: true, email: true, nombre: true } // Solo traemos lo necesario
+        });
+
+        // Si el usuario fue borrado O está marcado como inactivo (false)
+        if (!usuarioActual || !usuarioActual.activo) {
+            return res.status(403).json({ message: 'Su cuenta ha sido desactivada. Acceso revocado.' });
+        }
+
+        // 4. Todo correcto: Actualizamos la info del usuario en la petición
+        // Esto es genial porque 'req.user' siempre tendrá la info más fresca de la BD
+        (req as AuthRequest).user = usuarioActual;
+        
+        next();
+
+    } catch (dbError) {
+        console.error("Error verificando usuario en middleware:", dbError);
+        return res.status(500).json({ message: 'Error interno de autenticación' });
+    }
   });
 };
