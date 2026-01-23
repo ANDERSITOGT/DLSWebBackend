@@ -50,7 +50,7 @@ router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) =>
 
 // ===============================
 // POST /api/solicitudes
-// Crear (Usa Servicio - Lógica Refactorizada)
+// Crear (Con Mapeo Inteligente para Devoluciones)
 // ===============================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   console.log("📥 Recibiendo solicitud:", req.body);
@@ -59,10 +59,42 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     const user = req.user;
     if (!user) return res.status(401).json({ message: "Usuario no autenticado" });
 
-    // Delegamos la validación y creación al servicio
+    // 1. OBTENER ITEMS
+    // El frontend envía "items", pero a veces la cantidad viene fuera (en devoluciones)
+    const itemsEntrantes = req.body.items || [];
+
+    // 2. PROCESAR Y COMPLETAR DATOS FALTANTES
+    // Usamos Promise.all para poder hacer consultas a BD si falta la unidad
+    const productosProcesados = await Promise.all(itemsEntrantes.map(async (item: any) => {
+        let unidadId = item.unidadId;
+
+        // Si el frontend no mandó la unidad (común en devoluciones simplificadas), la buscamos
+        if (!unidadId && item.productoId) {
+            const prod = await prisma.producto.findUnique({
+                where: { id: item.productoId },
+                select: { unidadid: true }
+            });
+            unidadId = prod?.unidadid;
+        }
+
+        // Lógica de cantidad: Si no viene en el item, buscar en el cuerpo principal (para devoluciones de 1 item)
+        const cantidadFinal = item.cantidad ? Number(item.cantidad) : Number(req.body.cantidad);
+
+        return {
+            productoid: item.productoId,
+            unidadid: unidadId, // Ahora aseguramos que esto tenga valor
+            cantidad: cantidadFinal,
+            loteid: item.loteId,
+            notas: item.notas
+        };
+    }));
+
+    // 3. LLAMAR AL SERVICIO
+    // Ahora le pasamos 'productos' (que es lo que espera) en lugar de 'items'
     const nuevaSolicitud = await solicitudesService.crearSolicitud({
         ...req.body,
-        solicitanteid: req.body.solicitanteId 
+        solicitanteid: req.body.solicitanteId || user.id,
+        productos: productosProcesados
     }, { id: user.id, rol: user.rol });
 
     console.log("✅ Solicitud creada:", nuevaSolicitud.id);
@@ -113,7 +145,6 @@ router.get("/:id/export", async (req, res) => {
 // ===============================
 // POST /:id/entregar
 // Generar Documento de Salida/Devolución
-// (MANTENEMOS ESTA LÓGICA AQUÍ POR AHORA)
 // ===============================
 router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -137,7 +168,11 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
           throw new Error(`La solicitud ya está en estado ${solicitud.estado} y no se puede procesar nuevamente.`);
       }
 
-      const esDespacho = solicitud.tipo === "DESPACHO";
+      // IMPORTANTE: Como la columna 'tipo' puede no estar en la BD aún, leemos con cuidado.
+      // Si la columna no existe en la BD, (solicitud as any).tipo será undefined.
+      // Asumimos 'DESPACHO' por defecto si no hay info.
+      const tipoReal = (solicitud as any).tipo || "DESPACHO";
+      const esDespacho = tipoReal === "DESPACHO";
       const tipoDocumento = esDespacho ? "SALIDA" : "DEVOLUCION";
 
       // 2. Consecutivo Documento
@@ -175,11 +210,11 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
           bodegadestinoid: !esDespacho ? solicitud.bodegaid : null, 
           solicitanteid: solicitud.solicitanteid,
           consecutivo: codigoDoc,
-          observacion: `Generado automáticamente desde Solicitud ${solicitud.id} (${solicitud.tipo})`
+          observacion: `Generado automáticamente desde Solicitud ${solicitud.id} (${tipoReal})`
         }
       });
 
-      // 4. Mover Items y Validar Stock Final
+      // 4. Mover Items y Validar Stock (Solo si es despacho)
       for (const item of solicitud.solicitud_item) {
         if (esDespacho) {
              const ingresos = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"INGRESO", estado:"APROBADO"}}});
