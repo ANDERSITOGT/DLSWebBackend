@@ -24,7 +24,6 @@ router.get("/lotes", authenticateToken, async (req: AuthRequest, res: Response) 
 
 // ===============================
 // GET /api/catalogos/fincas-lotes
-// (Sin token obligatorio para evitar bloqueos, pero filtra si lo hay)
 // ===============================
 router.get("/fincas-lotes", async (req: any, res: Response) => {
   try {
@@ -103,8 +102,23 @@ router.get("/categorias", async (req, res) => {
 });
 
 // ===============================
+// GET /api/catalogos/unidades
+// ===============================
+router.get("/unidades", async (req, res) => {
+    try {
+      const unidades = await prisma.unidad.findMany({
+        orderBy: { nombre: "asc" },
+        select: { id: true, nombre: true, abreviatura: true }
+      });
+      res.json(unidades);
+    } catch (error) {
+      console.error("❌ Error en /unidades:", error);
+      res.status(500).json({ error: "Error al obtener unidades de medida" });
+    }
+});
+
+// ===============================
 // GET /api/catalogos/productos-busqueda
-// (CORREGIDO: Ahora devuelve el ID de la unidad)
 // ===============================
 router.get("/productos-busqueda", async (req, res) => {
   try {
@@ -120,10 +134,10 @@ router.get("/productos-busqueda", async (req, res) => {
         } : {})
       },
       take: 20, 
-      // 👇 AQUÍ ESTABA EL ERROR: Faltaba pedir el 'id'
       include: { 
+          // ✅ Mantenemos esto que arreglaba el nombre en la lista
           unidad: { 
-              select: { id: true, abreviatura: true } 
+              select: { id: true, nombre: true, abreviatura: true } 
           } 
       }
     });
@@ -137,9 +151,18 @@ router.get("/productos-busqueda", async (req, res) => {
 
         const stockFisico = ((Number(ingresos._sum.cantidad) || 0) + (Number(devIn._sum.cantidad) || 0) + (Number(ajustes._sum.cantidad) || 0)) - ((Number(salidas._sum.cantidad) || 0) + (Number(devOut._sum.cantidad) || 0));
 
+        // 👇 CÓDIGO CORREGIDO AQUÍ ABAJO
+        // Se eliminó la línea 'tipo: "DESPACHO"' para evitar el error de columna inexistente
         const comprometido = await prisma.solicitud_item.aggregate({
             _sum: { cantidad: true },
-            where: { productoid: p.id, solicitud: { estado: { in: ["PENDIENTE", "APROBADA"] }, tipo: "DESPACHO" } }
+            where: { 
+                productoid: p.id, 
+                solicitud: { 
+                    estado: { in: ["PENDIENTE", "APROBADA"] }
+                    // ⚠️ IMPORTANTE: Cuando actualices tu BD, descomenta la siguiente línea:
+                    // tipo: "DESPACHO" 
+                } 
+            }
         });
         
         const cantComprometida = Number(comprometido._sum.cantidad) || 0;
@@ -150,12 +173,13 @@ router.get("/productos-busqueda", async (req, res) => {
             nombre: p.nombre,
             codigo: p.codigo,
             precioref: p.precioref,
-            unidad: p.unidad, // Ahora incluye { id, abreviatura }
+            unidad: p.unidad,
             stockActual: disponible > 0 ? disponible : 0
         };
     }));
     res.json(productosConStock);
   } catch (error) {
+    console.error("Error buscando productos:", error); // Log para ver errores en consola
     res.status(500).json({ error: "Error al buscar productos" });
   }
 });
@@ -182,9 +206,17 @@ router.get("/productos/buscar", async (req, res) => {
 
         const stockFisico = ((Number(ingresos._sum.cantidad) || 0) + (Number(devIn._sum.cantidad) || 0) + (Number(ajustes._sum.cantidad) || 0)) - ((Number(salidas._sum.cantidad) || 0) + (Number(devOut._sum.cantidad) || 0));
 
+        // 👇 CÓDIGO CORREGIDO TAMBIÉN AQUÍ
         const comprometido = await prisma.solicitud_item.aggregate({
             _sum: { cantidad: true },
-            where: { productoid: p.id, solicitud: { estado: { in: ["PENDIENTE", "APROBADA"] }, tipo: "DESPACHO" } }
+            where: { 
+                productoid: p.id, 
+                solicitud: { 
+                    estado: { in: ["PENDIENTE", "APROBADA"] }
+                    // ⚠️ IMPORTANTE: Descomentar cuando la BD esté actualizada
+                    // tipo: "DESPACHO" 
+                } 
+            }
         });
         
         const cantComprometida = Number(comprometido._sum.cantidad) || 0;
