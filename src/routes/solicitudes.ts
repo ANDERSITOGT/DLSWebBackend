@@ -7,7 +7,7 @@ const router = Router();
 
 // ===============================
 // GET /api/solicitudes
-// Listar (Usa Servicio)
+// Listar
 // ===============================
 router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -29,7 +29,7 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 
 // ===============================
 // GET /api/solicitudes/:id
-// Detalle (Usa Servicio)
+// Detalle
 // ===============================
 router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -50,7 +50,7 @@ router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) =>
 
 // ===============================
 // POST /api/solicitudes
-// Crear (Con Mapeo Inteligente para Devoluciones)
+// Crear (Universal: Soporta Despachos y Devoluciones)
 // ===============================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   console.log("📥 Recibiendo solicitud:", req.body);
@@ -59,45 +59,54 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     const user = req.user;
     if (!user) return res.status(401).json({ message: "Usuario no autenticado" });
 
-    // 1. OBTENER ITEMS
-    // El frontend envía "items", pero a veces la cantidad viene fuera (en devoluciones)
-    const itemsEntrantes = req.body.items || [];
+    // 1. DETECCIÓN INTELIGENTE DE ITEMS
+    // El frontend a veces manda 'productos' (Despachos) y a veces 'items' (Devoluciones)
+    // Aquí capturamos cualquiera de los dos.
+    const itemsEntrantes = req.body.productos || req.body.items || [];
 
-    // 2. PROCESAR Y COMPLETAR DATOS FALTANTES
-    // Usamos Promise.all para poder hacer consultas a BD si falta la unidad
-    const productosProcesados = await Promise.all(itemsEntrantes.map(async (item: any) => {
-        let unidadId = item.unidadId;
+    if (itemsEntrantes.length === 0) {
+        return res.status(400).json({ message: "La solicitud no contiene productos/items." });
+    }
 
-        // Si el frontend no mandó la unidad (común en devoluciones simplificadas), la buscamos
-        if (!unidadId && item.productoId) {
+    // 2. NORMALIZACIÓN DE DATOS
+    const productosMapeados = await Promise.all(itemsEntrantes.map(async (item: any) => {
+        // A. Normalizar IDs (Soportar camelCase y lowercase)
+        const rawProductoId = item.productoid || item.productoId;
+        const rawUnidadId = item.unidadid || item.unidadId;
+        const rawLoteId = item.loteid || item.loteId;
+        
+        // B. Recuperar Unidad si falta (Caso Devoluciones)
+        let unidadIdFinal = rawUnidadId;
+        if (!unidadIdFinal && rawProductoId) {
             const prod = await prisma.producto.findUnique({
-                where: { id: item.productoId },
+                where: { id: rawProductoId },
                 select: { unidadid: true }
             });
-            unidadId = prod?.unidadid;
+            unidadIdFinal = prod?.unidadid;
         }
 
-        // Lógica de cantidad: Si no viene en el item, buscar en el cuerpo principal (para devoluciones de 1 item)
+        // C. Normalizar Cantidad
+        // Prioridad: Cantidad del item > Cantidad global > 0
         const cantidadFinal = item.cantidad ? Number(item.cantidad) : Number(req.body.cantidad);
 
         return {
-            productoid: item.productoId,
-            unidadid: unidadId, // Ahora aseguramos que esto tenga valor
+            productoid: rawProductoId,
+            unidadid: unidadIdFinal, // Ahora seguro tiene valor
             cantidad: cantidadFinal,
-            loteid: item.loteId,
-            notas: item.notas
+            loteid: rawLoteId,
+            notas: item.notas || ""
         };
     }));
 
     // 3. LLAMAR AL SERVICIO
-    // Ahora le pasamos 'productos' (que es lo que espera) en lugar de 'items'
+    // Ahora le pasamos 'productos' (que es lo que espera) con el array corregido
     const nuevaSolicitud = await solicitudesService.crearSolicitud({
         ...req.body,
-        solicitanteid: req.body.solicitanteId || user.id,
-        productos: productosProcesados
+        solicitanteid: req.body.solicitanteId || user.id, 
+        productos: productosMapeados 
     }, { id: user.id, rol: user.rol });
 
-    console.log("✅ Solicitud creada:", nuevaSolicitud.id);
+    console.log("✅ Solicitud creada con items:", nuevaSolicitud.id);
     res.status(201).json({ ok: true, solicitud: nuevaSolicitud });
 
   } catch (error: any) {
@@ -108,7 +117,7 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 
 // ===============================
 // PATCH /:id/estado
-// Cambiar Estado (Usa Servicio)
+// Cambiar Estado
 // ===============================
 router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -126,7 +135,7 @@ router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Res
 
 // ===============================
 // GET /:id/export
-// PDF (Usa Servicio)
+// PDF
 // ===============================
 router.get("/:id/export", async (req, res) => {
   try {
@@ -145,6 +154,7 @@ router.get("/:id/export", async (req, res) => {
 // ===============================
 // POST /:id/entregar
 // Generar Documento de Salida/Devolución
+// (LÓGICA ORIGINAL MANTENIDA)
 // ===============================
 router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -168,9 +178,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
           throw new Error(`La solicitud ya está en estado ${solicitud.estado} y no se puede procesar nuevamente.`);
       }
 
-      // IMPORTANTE: Como la columna 'tipo' puede no estar en la BD aún, leemos con cuidado.
-      // Si la columna no existe en la BD, (solicitud as any).tipo será undefined.
-      // Asumimos 'DESPACHO' por defecto si no hay info.
+      // IMPORTANTE: Manejo seguro del campo 'tipo'
       const tipoReal = (solicitud as any).tipo || "DESPACHO";
       const esDespacho = tipoReal === "DESPACHO";
       const tipoDocumento = esDespacho ? "SALIDA" : "DEVOLUCION";
@@ -214,7 +222,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
         }
       });
 
-      // 4. Mover Items y Validar Stock (Solo si es despacho)
+      // 4. Mover Items y Validar Stock Final (Solo si es despacho)
       for (const item of solicitud.solicitud_item) {
         if (esDespacho) {
              const ingresos = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"INGRESO", estado:"APROBADO"}}});
