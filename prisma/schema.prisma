@@ -164,7 +164,7 @@ model lote_encargado {
 model producto {
   id                String           @id @default(dbgenerated("gen_random_uuid()"))
   codigo            String           @unique
-  codigoalt         String?
+  codigoalt         Int?             @unique
   nombre            String
   ingredienteactivo String?
   categoriaid       String
@@ -211,8 +211,8 @@ model solicitud {
   aprobadorid                              String?
   documentosalidaid                        String?           @unique
   createdat                                DateTime?         @default(now()) @db.Timestamp(6)
-  tipo                                     tipo_solicitud    @default(DESPACHO)
   solicitud_origen_id                      String?
+  tipo                                     tipo_solicitud    @default(DESPACHO)
   usuario_solicitud_aprobadoridTousuario   usuario?          @relation("solicitud_aprobadoridTousuario", fields: [aprobadorid], references: [id], onDelete: NoAction, onUpdate: NoAction)
   bodega                                   bodega?           @relation(fields: [bodegaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
   documento                                documento?        @relation(fields: [documentosalidaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
