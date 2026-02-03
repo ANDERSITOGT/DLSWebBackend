@@ -12,6 +12,7 @@ import movimientosRouter from "./routes/movimientos";
 import catalogosRouter from "./routes/catalogos";
 import usuariosRoutes from "./routes/usuarios";
 import productosRoutes from "./routes/productos";
+import proveedoresRouter from "./routes/proveedores";
 
 dotenv.config();
 
@@ -34,6 +35,7 @@ app.use("/api/movimientos", movimientosRouter);
 app.use("/api/catalogos", catalogosRouter);
 app.use("/api/usuarios", usuariosRoutes);
 app.use("/api/productos", productosRoutes);
+app.use("/api/proveedores", proveedoresRouter);
 
 
 // Health check (Útil para que Railway sepa que tu app vive)
