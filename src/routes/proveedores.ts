@@ -1,18 +1,30 @@
 import { Router, Response } from "express";
-import prisma from "../prisma"; // Ajusta la ruta a tu instancia de prisma
-import { authenticateToken, AuthRequest } from "../middlewares/auth"; // Ajusta rutas si es necesario
+import prisma from "../prisma";
+import { authenticateToken, AuthRequest } from "../middlewares/auth";
 
 const router = Router();
 
+// 🔒 FUNCIÓN HELPER: Verificar Permisos
+// Solo permitimos ADMIN y BODEGUERO.
+// Si agregas más roles en el futuro, solo editas esta función.
+const validarPermisos = (user: any) => {
+  const rolesPermitidos = ["ADMIN", "BODEGUERO"];
+  return rolesPermitidos.includes(user?.rol);
+};
+
 // ====================================================================
-// 1. OBTENER LISTA (Para la tabla tipo Excel)
+// 1. OBTENER LISTA
 // ====================================================================
 router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
+    // 1. Seguridad
+    if (!validarPermisos(req.user)) {
+      return res.status(403).json({ message: "No tienes permiso para ver proveedores." });
+    }
+
     const proveedores = await prisma.proveedor.findMany({
       orderBy: { nombre: 'asc' },
       include: {
-        // Incluimos los contactos para mostrar el contador o el detalle rápido
         proveedor_contacto: true 
       }
     });
@@ -24,16 +36,25 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 });
 
 // ====================================================================
-// 2. CREAR PROVEEDOR (El botón nuevo que pediste)
+// 2. CREAR PROVEEDOR
 // ====================================================================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { nombre, nit, notas } = req.body;
+    // 1. Seguridad
+    if (!validarPermisos(req.user)) {
+      return res.status(403).json({ message: "No tienes permiso para crear proveedores." });
+    }
 
-    // Validación básica
+    // 2. Sanitización (Trim)
+    let { nombre, nit, notas } = req.body;
+    nombre = nombre?.trim();
+    nit = nit?.trim();
+    notas = notas?.trim();
+
+    // 3. Validaciones
     if (!nombre) return res.status(400).json({ message: "El nombre es obligatorio" });
 
-    // Verificar duplicado
+    // Verificar duplicado (Case insensitive opcional, aquí exacto por ahora)
     const existe = await prisma.proveedor.findUnique({ where: { nombre } });
     if (existe) return res.status(400).json({ message: "Ya existe un proveedor con ese nombre" });
 
@@ -49,18 +70,21 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 });
 
 // ====================================================================
-// 3. EDICIÓN EN LÍNEA (Tipo Excel)
-// Solo permitimos editar NIT y NOTAS (Nombre no, como pediste)
+// 3. EDICIÓN EN LÍNEA (NIT y Notas)
 // ====================================================================
 router.patch("/:id", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
-    const { nit, notas } = req.body;
+    // 1. Seguridad
+    if (!validarPermisos(req.user)) {
+      return res.status(403).json({ message: "No tienes permiso para editar proveedores." });
+    }
 
-    // Solo actualizamos los campos permitidos si vienen en el body
+    const { id } = req.params;
+    let { nit, notas } = req.body;
+
     const updateData: any = {};
-    if (nit !== undefined) updateData.nit = nit;
-    if (notas !== undefined) updateData.notas = notas;
+    if (nit !== undefined) updateData.nit = nit?.trim();
+    if (notas !== undefined) updateData.notas = notas?.trim();
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ message: "No se enviaron datos para actualizar" });
@@ -79,25 +103,35 @@ router.patch("/:id", authenticateToken, async (req: AuthRequest, res: Response) 
 });
 
 // ====================================================================
-// 4. GESTIÓN DE CONTACTOS (Sub-recurso)
+// 4. GESTIÓN DE CONTACTOS
 // ====================================================================
 
-// Agregar contacto a un proveedor
+// Agregar contacto
 router.post("/:id/contactos", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params; // ID del proveedor
-    const { nombre, telefono, email, puesto, notas } = req.body;
+    // 1. Seguridad
+    if (!validarPermisos(req.user)) {
+      return res.status(403).json({ message: "No tienes permiso para agregar contactos." });
+    }
+
+    const { id } = req.params; 
+    let { nombre, telefono, email, puesto, notas } = req.body;
+    nombre = nombre?.trim();
 
     if (!nombre) return res.status(400).json({ message: "El nombre del contacto es obligatorio" });
+
+    // 2. Verificar que el padre existe
+    const proveedorExiste = await prisma.proveedor.findUnique({ where: { id } });
+    if (!proveedorExiste) return res.status(404).json({ message: "El proveedor no existe." });
 
     const nuevoContacto = await prisma.proveedor_contacto.create({
       data: {
         proveedorid: id,
         nombre,
-        telefono,
-        email,
-        puesto,
-        notas
+        telefono: telefono?.trim(),
+        email: email?.trim(),
+        puesto: puesto?.trim(),
+        notas: notas?.trim()
       }
     });
 
@@ -108,10 +142,20 @@ router.post("/:id/contactos", authenticateToken, async (req: AuthRequest, res: R
   }
 });
 
-// Eliminar un contacto
+// Eliminar contacto
 router.delete("/contactos/:contactoId", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
+    // 1. Seguridad
+    if (!validarPermisos(req.user)) {
+      return res.status(403).json({ message: "No tienes permiso para eliminar contactos." });
+    }
+
     const { contactoId } = req.params;
+
+    // Verificar existencia antes de borrar (opcional, pero buena práctica para dar 404)
+    const existe = await prisma.proveedor_contacto.findUnique({ where: { id: contactoId } });
+    if (!existe) return res.status(404).json({ message: "El contacto no existe" });
+
     await prisma.proveedor_contacto.delete({ where: { id: contactoId } });
     res.json({ success: true });
   } catch (error) {
