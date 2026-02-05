@@ -22,16 +22,22 @@ router.get("/lotes", authenticateToken, async (req: AuthRequest, res: Response) 
     }
 });
 
+
 // ===============================
 // GET /api/catalogos/fincas-lotes
 // ===============================
-router.get("/fincas-lotes", async (req: any, res: Response) => {
+
+router.get("/fincas-lotes", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const usuarioId = req.user?.id; 
+    const usuarioId = req.user?.id;
     const usuarioRol = req.user?.rol;
 
-    let loteWhere: any = { estado: "ABIERTO" };
+    // 1. Filtro Base: Solo lotes ABIERTOS (Activos)
+    let loteWhere: any = { 
+        estado: "ABIERTO" 
+    };
 
+    // 2. Filtro de Seguridad: Si es SOLICITANTE, solo sus asignados
     if (usuarioRol === "SOLICITANTE" && usuarioId) {
        loteWhere.encargados = {
          some: { usuarioid: usuarioId }
@@ -42,19 +48,35 @@ router.get("/fincas-lotes", async (req: any, res: Response) => {
       orderBy: { nombre: "asc" },
       include: {
         lote: {
-          where: loteWhere, 
-          select: { id: true, codigo: true, cultivo: { select: { nombre: true } } }
+          where: loteWhere, // 👈 Aquí aplicamos el filtro inteligente
+          select: { 
+              id: true, 
+              codigo: true, 
+              // Incluimos cultivo para mostrar "LOTE X - FRESA" en el select
+              cultivo: { select: { nombre: true } } 
+          }
         }
       }
     });
 
-    const fincasVisibles = fincas.filter(f => f.lote.length > 0);
+    // 3. Limpieza: Solo devolvemos fincas que tengan al menos un lote visible
+    const fincasVisibles = fincas
+        .map(f => ({
+            ...f,
+            // Aseguramos que la lista de lotes esté limpia (aunque el include ya lo hace, esto previene nulos)
+            lote: f.lote || [] 
+        }))
+        .filter(f => f.lote.length > 0);
+
     res.json(fincasVisibles);
+
   } catch (error) {
     console.error("❌ Error en /fincas-lotes:", error);
     res.status(500).json({ error: "Error al obtener fincas y lotes" });
   }
 });
+
+
 
 // ===============================
 // GET /api/catalogos/bodegas
