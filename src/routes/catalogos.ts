@@ -252,4 +252,27 @@ router.get("/productos/buscar", async (req, res) => {
   }
 });
 
+
+// ===============================
+// GET /api/catalogos/CULTIVOS
+// ===============================
+
+
+router.get("/cultivos", authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const cultivos = await prisma.cultivo.findMany({
+      orderBy: { nombre: "asc" },
+      select: { id: true, nombre: true, variedad: true }
+    });
+    res.json(cultivos);
+  } catch (error) {
+    console.error("Error al obtener cultivos:", error);
+    res.status(500).json({ error: "Error al obtener cultivos" });
+  }
+});
+
+
+
+
+
 export default router;
