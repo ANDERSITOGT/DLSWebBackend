@@ -5,10 +5,6 @@ import { movimientosService } from "../services/movimientosService";
 
 const router = Router();
 
-// ... (Función calcularModa y RUTAS POST se mantienen IGUAL que antes, no las repito para ahorrar espacio, PERO NO LAS BORRES de tu archivo) ...
-// ... (Aquí van POST /ingreso, /ajuste, /devolucion-proveedor) ...
-// ... Si necesitas que las repita dímelo, pero asumiré que ya las tienes del paso anterior.
-
 // ---------------------------------------------------------------------
 // FUNCIÓN AUXILIAR: CALCULAR MODA
 // ---------------------------------------------------------------------
@@ -158,10 +154,10 @@ router.post("/devolucion-proveedor", authenticateToken, async (req: AuthRequest,
 
 
 // ================================
-// RUTAS DE LECTURA (MODIFICADA CON SEGURIDAD)
+// RUTAS DE LECTURA
 // ================================
 
-// 1. MOVIMIENTOS GENERALES (Filtro por Solicitante)
+// 1. MOVIMIENTOS GENERALES
 router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const usuario = req.user ? { id: req.user.id, rol: req.user.rol } : undefined;
@@ -176,9 +172,6 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 // 2. EXPORTAR MOVIMIENTOS
 router.get("/export", async (req, res) => {
   try {
-    // Nota: Si esto lo llama un botón directo sin auth header (window.open), fallará el req.user. 
-    // Para producción idealmente usar tokens en URL o cookies. 
-    // Por ahora asumimos que funciona o es público interno.
     const { filename, mime, content } = await movimientosService.exportListadoMovimientosPDF();
     res.setHeader("Content-Type", mime);
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -188,51 +181,7 @@ router.get("/export", async (req, res) => {
   }
 });
 
-// 3. LOTES (🔒 PROTEGIDO: Solo Admin, Bodeguero, Visor)
-router.get("/lotes", authenticateToken, async (req: AuthRequest, res: Response) => {
-  try {
-    // Bloqueo explícito para Solicitantes
-    if (req.user?.rol === "SOLICITANTE") {
-        return res.status(403).json({ message: "Acceso denegado a Lotes." });
-    }
-
-    const data = await movimientosService.getListadoLotes();
-    res.json({ lotes: data });
-  } catch (error) {
-    res.status(500).json({ message: "Error al obtener lotes" });
-  }
-});
-
-router.get("/lotes/:id", authenticateToken, async (req: AuthRequest, res: Response) => {
-  try {
-    if (req.user?.rol === "SOLICITANTE") {
-        return res.status(403).json({ message: "Acceso denegado a Lotes." });
-    }
-
-    const loteId = req.params.id;
-    const data = await movimientosService.getDetalleLote(loteId);
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ message: "Error al obtener lote" });
-  }
-});
-
-router.get("/lotes/:id/export", authenticateToken, async (req: AuthRequest, res: Response) => {
-  try {
-    if (req.user?.rol === "SOLICITANTE") {
-        return res.status(403).send("Acceso denegado");
-    }
-
-    const loteId = req.params.id;
-    const { filename, mime, content } = await movimientosService.exportHistorialLotePDF(loteId);
-    res.setHeader("Content-Type", mime);
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.send(content);
-  } catch (error) {
-    res.status(500).send("Error al exportar");
-  }
-});
-
+// 3. DETALLE DE MOVIMIENTO
 router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id;
@@ -243,6 +192,7 @@ router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) =>
   }
 });
 
+// 4. EXPORTAR DETALLE MOVIMIENTO
 router.get("/:id/export", async (req, res) => {
   try {
     const id = req.params.id;

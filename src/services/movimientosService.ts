@@ -1,4 +1,3 @@
-// src/services/movimientosService.ts
 import prisma from "../prisma";
 import PDFDocument from "pdfkit";
 
@@ -63,59 +62,24 @@ export type MovimientoDetalleDTO = {
   observacion: string | null;
 };
 
-// ===== Lotes =====
-export type EstadoLoteFront = "ACTIVO" | "INACTIVO";
-
-export type LoteResumenDTO = {
-  id: string;
-  codigo: string;
-  finca: string;
-  cultivo: string;
-  area: string;
-  estado: EstadoLoteFront;
-  aplicacionesCount: number;
-};
-
-export type LoteAplicacionDTO = {
-  id: string;
-  documentoId: string;
-  documentoCodigo: string;
-  tipo: MovimientoTipo;
-  fecha: string | null;
-  bodega: string | null;
-  producto: string;
-  cantidad: string;
-  unidad: string;
-};
-
-export type LoteDetalleDTO = {
-  lote: LoteResumenDTO;
-  aplicaciones: LoteAplicacionDTO[];
-};
-
 // =============================
 // Servicio
 // =============================
 export const movimientosService = {
   
   // ---------------------------------------
-  // LISTADO DE DOCUMENTOS / MOVIMIENTOS (CON FILTRO BLINDADO 🛡️)
+  // LISTADO DE DOCUMENTOS / MOVIMIENTOS
   // ---------------------------------------
   async getListadoMovimientos(usuario?: { id: string; rol: string }): Promise<MovimientoResumenDTO[]> {
-    
-    // 👇 CONSTRUIMOS EL FILTRO DINÁMICO
     const where: any = {};
 
-    // 🛡️ LÓGICA DE SEGURIDAD
-    // Si existe usuario Y su rol es SOLICITANTE, filtramos por su ID.
-    // Si es ADMIN, BODEGUERO o undefined (por error), no filtramos.
     if (usuario && usuario.rol === "SOLICITANTE") {
         where.solicitanteid = usuario.id;
     }
 
     try {
         const documentos = await prisma.documento.findMany({
-          where, // 👈 APLICAMOS EL FILTRO
+          where,
           orderBy: { createdat: "desc" },
           take: 50,
           include: {
@@ -147,7 +111,7 @@ export const movimientosService = {
         });
     } catch (error) {
         console.error("Error en prisma.documento.findMany:", error);
-        throw error; // Re-lanzar para que el router lo capture
+        throw error;
     }
   },
 
@@ -155,7 +119,6 @@ export const movimientosService = {
   // DETALLE DE UN DOCUMENTO / MOVIMIENTO
   // ---------------------------------------
   async getDetalleMovimiento(idOrCodigo: string): Promise<MovimientoDetalleDTO> {
-    
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrCodigo);
     const whereClause = isUuid ? { id: idOrCodigo } : { consecutivo: idOrCodigo };
 
@@ -226,103 +189,6 @@ export const movimientosService = {
   },
 
   // ---------------------------------------
-  // LISTADO DE LOTES
-  // ---------------------------------------
-  async getListadoLotes(): Promise<LoteResumenDTO[]> {
-    const lotes = await prisma.lote.findMany({
-      include: { finca: true, cultivo: true },
-      orderBy: { createdat: "desc" },
-      take: 50,
-    });
-
-    const resultado: LoteResumenDTO[] = [];
-
-    for (const lote of lotes) {
-      let area = "-";
-      if (lote.areamanzanas != null) area = `${Number(lote.areamanzanas)} mz`;
-      else if (lote.areahectareas != null) area = `${Number(lote.areahectareas)} ha`;
-      else if (lote.areametroslineales != null) area = `${Number(lote.areametroslineales)} ml`;
-
-      const estadoFront: EstadoLoteFront = lote.estado === "ABIERTO" ? "ACTIVO" : "INACTIVO";
-      const aplicacionesCount = await prisma.documento_item.count({
-        where: { loteid: lote.id, documento: { tipo: "SALIDA" } },
-      });
-
-      resultado.push({
-        id: lote.id,
-        codigo: lote.codigo,
-        finca: lote.finca?.nombre ?? "",
-        cultivo: lote.cultivo?.nombre ?? "",
-        area,
-        estado: estadoFront,
-        aplicacionesCount,
-      });
-    }
-    return resultado;
-  },
-
-  // ---------------------------------------
-  // DETALLE DE LOTE (Historial COMPLETO)
-  // ---------------------------------------
-  async getDetalleLote(loteId: string): Promise<LoteDetalleDTO> {
-    const lote = await prisma.lote.findUnique({
-      where: { id: loteId },
-      include: { finca: true, cultivo: true },
-    });
-
-    if (!lote) throw new Error("Lote no encontrado");
-
-    let area = "-";
-    if (lote.areamanzanas != null) area = `${Number(lote.areamanzanas)} mz`;
-    else if (lote.areahectareas != null) area = `${Number(lote.areahectareas)} ha`;
-    else if (lote.areametroslineales != null) area = `${Number(lote.areametroslineales)} ml`;
-
-    const estadoFront: EstadoLoteFront = lote.estado === "ABIERTO" ? "ACTIVO" : "INACTIVO";
-
-    const aplicacionesRaw = await prisma.documento_item.findMany({
-      where: { loteid: loteId, documento: { tipo: "SALIDA" } },
-      orderBy: { createdat: "desc" },
-      include: {
-        producto: true,
-        unidad: true,
-        documento: { include: { bodega_documento_bodegaorigenidTobodega: true } },
-      },
-    });
-
-    const aplicaciones: LoteAplicacionDTO[] = aplicacionesRaw.map((item) => {
-      const doc = item.documento;
-      const bodega = doc?.bodega_documento_bodegaorigenidTobodega?.nombre ?? null;
-      const cantidadNum = Number(item.cantidad) || 0;
-      const unidad = item.unidad?.abreviatura ?? "";
-
-      return {
-        id: item.id,
-        documentoId: doc?.id ?? "",
-        documentoCodigo: doc?.consecutivo ?? doc?.id ?? "",
-        tipo: (doc?.tipo ?? "SALIDA") as MovimientoTipo,
-        fecha: doc?.fecha ? doc.fecha.toISOString() : null,
-        bodega,
-        producto: item.producto?.nombre ?? "",
-        cantidad: `${cantidadNum} ${unidad}`.trim(),
-        unidad,
-      };
-    });
-
-    return {
-      lote: {
-        id: lote.id,
-        codigo: lote.codigo,
-        finca: lote.finca?.nombre ?? "",
-        cultivo: lote.cultivo?.nombre ?? "",
-        area,
-        estado: estadoFront,
-        aplicacionesCount: aplicaciones.length,
-      },
-      aplicaciones,
-    };
-  },
-
-  // ---------------------------------------
   // EXPORTS en PDF
   // ---------------------------------------
   async exportListadoMovimientosPDF(): Promise<{ filename: string; mime: string; content: Buffer }> {
@@ -367,29 +233,5 @@ export const movimientosService = {
     });
     const safeCodigo = det.codigo.replace(/[^a-zA-Z0-9_-]/g, "_");
     return { filename: `documento_${safeCodigo}.pdf`, mime: "application/pdf", content: buffer };
-  },
-
-  async exportHistorialLotePDF(loteId: string): Promise<{ filename: string; mime: string; content: Buffer }> {
-    const detalle = await this.getDetalleLote(loteId);
-    const { lote, aplicaciones } = detalle;
-    const buffer = await buildPDF((doc) => {
-      doc.fontSize(16).text(`Historial de lote ${lote.codigo}`, { align: "center" });
-      doc.moveDown();
-      doc.fontSize(10);
-      doc.text(`Finca: ${lote.finca}`);
-      // ...
-      doc.moveDown();
-      doc.fontSize(12).text("Historial de aplicaciones", { underline: true });
-      doc.moveDown(0.5);
-      doc.fontSize(10);
-      aplicaciones.forEach((ap) => {
-        doc.font("Helvetica-Bold").text(`${ap.documentoCodigo} (${ap.tipo})`);
-        doc.font("Helvetica").text(`Fecha: ${ap.fecha ?? "-"}   Bodega: ${ap.bodega ?? "-"}`);
-        doc.text(`Producto: ${ap.producto}   Cantidad: ${ap.cantidad} ${ap.unidad}`);
-        doc.moveDown(0.6);
-      });
-    });
-    const safeCodigo = lote.codigo.replace(/[^a-zA-Z0-9_-]/g, "_");
-    return { filename: `lote_${safeCodigo}_historial.pdf`, mime: "application/pdf", content: buffer };
   },
 };
