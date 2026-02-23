@@ -1,8 +1,7 @@
-// src/services/inventarioService.ts
 import prisma from "../prisma";
 
 // ===============================
-// Tipos que usa el frontend
+// Tipos
 // ===============================
 export type EstadoStock = "Normal" | "Bajo" | "Crítico";
 export type EstadoProducto = "ACTIVO" | "INACTIVO";
@@ -21,8 +20,8 @@ export type InventarioProductoDTO = {
 
 export type MovimientoDetalleDTO = {
   id: string;
-  documentoId: string;   // Visual: "SAL-2026-001"
-  documentoUuid: string; // ID Real para la BD
+  documentoId: string;   
+  documentoUuid: string; 
   tipo: string;
   cantidadConSigno: string;
   unidad: string;
@@ -73,79 +72,77 @@ function numeroDesdeDecimal(value: any): number {
 // Servicio principal
 // ===============================
 export const inventarioService = {
+  
   // --------------------------------------------------
-  // Listado de productos (Cálculo Masivo Optimizado)
+  // 1. LISTADO OPTIMIZADO (Server-Side Filtering)
   // --------------------------------------------------
-  async getListadoProductos(): Promise<InventarioProductoDTO[]> {
+  async getListadoProductos(opciones?: { limit?: number; search?: string; categoria?: string }): Promise<InventarioProductoDTO[]> {
+    
+    // A. Construir Filtros (WHERE)
+    const whereClause: any = {};
+
+    if (opciones?.search) {
+      whereClause.OR = [
+        { nombre: { contains: opciones.search, mode: 'insensitive' } },
+        { codigo: { contains: opciones.search, mode: 'insensitive' } }
+      ];
+    }
+
+    if (opciones?.categoria) {
+      whereClause.categoria = { nombre: opciones.categoria };
+    }
+
+    // B. Definir Ordenamiento (ORDER BY)
+    // Estrategia: Si el usuario NO busca nada, le mostramos lo que más se mueve.
+    let orderByClause: any = { nombre: 'asc' };
+    
+    if (!opciones?.search && !opciones?.categoria) {
+        // "Los más usados": Ordenar por cantidad de movimientos en el historial
+        orderByClause = { documento_item: { _count: 'desc' } };
+    }
+
+    // C. Consulta a Base de Datos (Solo traemos los necesarios)
     const productos = await prisma.producto.findMany({
+      where: whereClause,
+      take: opciones?.limit, // Aplica el límite (30 o undefined para todos)
+      orderBy: orderByClause,
       include: {
         categoria: true,
         unidad: true,
       },
-      orderBy: { nombre: "asc" },
     });
 
-    // Traemos todos los items aprobados
+    if (productos.length === 0) return [];
+
+    // D. Cálculo de Stock (Solo para los productos recuperados)
+    const productIds = productos.map(p => p.id);
+
     const items = await prisma.documento_item.findMany({
       where: {
+          productoid: { in: productIds }, // Optimización vital
           documento: { estado: "APROBADO" }
       },
-      include: { 
-          documento: { 
-              select: { tipo: true, proveedorid: true } // Solo traemos lo necesario para el signo
-          } 
-      },
+      select: {
+          productoid: true,
+          cantidad: true,
+          documento: { select: { tipo: true, proveedorid: true } }
+      }
     });
 
+    // Sumar en memoria
     const existencias: Record<string, number> = {};
 
     for (const item of items) {
       const doc = item.documento;
       if (!doc) continue;
-
       const qty = numeroDesdeDecimal(item.cantidad);
       let signo = 0;
 
-      switch (doc.tipo) {
-        case "INGRESO":
-            signo = 1;
-            break;
-        case "SALIDA":
-            signo = -1;
-            break;
-        case "AJUSTE":
-            // En Ajustes, confiamos en el signo guardado en la BD (si usas -10 o 10).
-            // Pero como la DB guarda "cantidad" positivo generalmente, aquí definimos la regla:
-            // Por ahora asumimos que Ajuste SUMA. 
-            // TODO: Si implementamos Ajuste Negativo, deberíamos guardar el signo o un subtipo.
-            // Para simplificar tu modelo actual: Asumiremos que AJUSTE siempre SUMA,
-            // y si quieres restar usas SALIDA o una lógica de cantidad negativa si la DB lo permite.
-            // *MEJORA*: Si permites guardar cantidad negativa en la BD, esto funciona directo.
-            // Si no, definimos: Ajuste = +1. (Requiere "Salida por Ajuste" como otro tipo o signo).
-            // Dado tu esquema Decimal, asumimos que guardarás -10 si es resta.
-            signo = 1; 
-            break;
-        case "DEVOLUCION":
-            // AQUÍ LA LÓGICA IMPORTANTE:
-            // Si tiene proveedor -> Es Salida (Resta)
-            // Si no tiene proveedor -> Es Entrada Interna (Suma)
-            if (doc.proveedorid) {
-                signo = -1;
-            } else {
-                signo = 1;
-            }
-            break;
-        case "TRANSFERENCIA":
-            // En el inventario general (suma de todas las bodegas), la transferencia es neutra (0).
-            // Pero si filtras por bodega, una suma y otra resta.
-            // Como este reporte es GLOBAL, es 0.
-            signo = 0;
-            break;
-        default:
-            signo = 0;
-      }
+      if (doc.tipo === "INGRESO") signo = 1;
+      else if (doc.tipo === "SALIDA") signo = -1;
+      else if (doc.tipo === "AJUSTE") signo = 1; 
+      else if (doc.tipo === "DEVOLUCION") signo = doc.proveedorid ? -1 : 1;
 
-      // Aplicar el signo a la cantidad (si la cantidad en BD ya viene negativa, esto la respeta)
       if (signo !== 0) {
         const key = item.productoid;
         if (!existencias[key]) existencias[key] = 0;
@@ -153,9 +150,9 @@ export const inventarioService = {
       }
     }
 
-    const resultado: InventarioProductoDTO[] = productos.map((p) => {
+    // E. Construir respuesta
+    return productos.map((p) => {
       const unidadAbrev = p.unidad?.abreviatura ?? "";
-      const categoriaNombre = p.categoria?.nombre ?? "";
       const stockNumero = existencias[p.id] ?? 0;
 
       return {
@@ -163,19 +160,17 @@ export const inventarioService = {
         nombre: p.nombre,
         codigo: p.codigo,
         detalle: p.ingredienteactivo ?? "",
-        categoria: categoriaNombre,
+        categoria: p.categoria?.nombre ?? "",
         unidad: unidadAbrev,
         stockTotal: `${stockNumero} ${unidadAbrev}`.trim(),
         estadoProducto: p.activo ? "ACTIVO" : "INACTIVO",
         estadoStock: calcularEstadoStock(stockNumero),
       };
     });
-
-    return resultado;
   },
 
   // --------------------------------------------------
-  // Detalle de un producto (Kardex Detallado)
+  // 2. DETALLE / KARDEX (Restaurado)
   // --------------------------------------------------
   async getDetalleProducto(productoId: string): Promise<DetalleProductoDTO> {
     const producto = await prisma.producto.findUnique({
@@ -185,7 +180,7 @@ export const inventarioService = {
 
     if (!producto) throw new Error("Producto no encontrado");
 
-    // Traemos items de documentos APROBADOS
+    // Historial para visualización (últimos 100)
     const movimientosRaw = await prisma.documento_item.findMany({
       where: { 
           productoid: productoId,
@@ -196,17 +191,15 @@ export const inventarioService = {
         unidad: true,
         lote: true,
       },
-      orderBy: { createdat: "desc" }, // Del más reciente al más antiguo
-      take: 100, // Aumentamos el historial
+      orderBy: { createdat: "desc" },
+      take: 100, 
     });
 
     const bodegas = await prisma.bodega.findMany();
     const bodegasMap = new Map<string, string>();
     for (const b of bodegas) bodegasMap.set(b.id, b.nombre);
 
-    // Nota: Para calcular la existencia actual exacta, deberíamos sumar TODOS los movimientos históricos,
-    // no solo los últimos 100.
-    // Hacemos una consulta agregada rápida para el total real.
+    // Cálculo total histórico exacto
     const allItems = await prisma.documento_item.findMany({
         where: { productoid: productoId, documento: { estado: "APROBADO" } },
         select: { cantidad: true, documento: { select: { tipo: true, proveedorid: true } } }
@@ -224,7 +217,6 @@ export const inventarioService = {
         existenciaTotalCalculada += (s * q);
     }
 
-    // Procesamos la lista visual
     const movimientos: MovimientoDetalleDTO[] = movimientosRaw.map((item) => {
       const doc = item.documento;
       if (!doc) return null as any;
@@ -234,59 +226,39 @@ export const inventarioService = {
       let tipoTexto = doc.tipo as string;
       
       switch (doc.tipo) {
-        case "INGRESO":
-          signo = 1;
-          break;
-        case "SALIDA":
-          signo = -1;
-          break;
-        case "AJUSTE":
-          signo = 1; // Asumiendo positivo
-          // Si la cantidad fuera negativa en BD, se pintaría roja sola.
-          break;
+        case "INGRESO": signo = 1; break;
+        case "SALIDA": signo = -1; break;
+        case "AJUSTE": signo = 1; break;
         case "DEVOLUCION":
-          if (doc.proveedorid) {
-              signo = -1;
-              tipoTexto = "DEV. PROVEEDOR"; // Etiqueta más clara
-          } else {
-              signo = 1;
-              tipoTexto = "DEV. INTERNA";
-          }
+          if (doc.proveedorid) { signo = -1; tipoTexto = "DEV. PROVEEDOR"; } 
+          else { signo = 1; tipoTexto = "DEV. INTERNA"; }
           break;
-        default:
-          signo = 0;
+        default: signo = 0;
       }
 
-      // Formato visual: "+10" o "-5"
-      // Si la cantidad original ya es negativa (ej. ajuste -5), respetamos ese signo visualmente
       const finalQty = signo * qty;
       const cantidadConSigno = finalQty > 0 ? `+${Math.abs(finalQty)}` : `-${Math.abs(finalQty)}`;
 
-      // Lógica de texto de bodega
       let bodegaTexto = "";
       const origenId = (doc as any).bodegaorigenid;
       const destinoId = (doc as any).bodegadestinoid;
-      const origen = origenId ? bodegasMap.get(origenId) : "";
-      const destino = destinoId ? bodegasMap.get(destinoId) : "";
-
+      
       if (doc.tipo === "TRANSFERENCIA") {
-        bodegaTexto = `${origen || "?"} → ${destino || "?"}`;
-      } else if (doc.tipo === "INGRESO" || (doc.tipo === "DEVOLUCION" && !doc.proveedorid)) {
-         // Entradas (Ingreso o Dev Interna) van a una bodega destino (o se asume la del doc)
-         bodegaTexto = destino || origen || ""; 
+        bodegaTexto = `${origenId ? bodegasMap.get(origenId) : "?"} → ${destinoId ? bodegasMap.get(destinoId) : "?"}`;
+      } else if (signo > 0) {
+         bodegaTexto = destinoId ? bodegasMap.get(destinoId) || "" : ""; 
       } else {
-         // Salidas salen de una bodega origen
-         bodegaTexto = origen || destino || "";
+         bodegaTexto = origenId ? bodegasMap.get(origenId) || "" : "";
       }
 
       return {
         id: item.id,
         documentoId: doc.consecutivo ?? doc.id,
         documentoUuid: doc.id,
-        tipo: tipoTexto, // Usamos el texto enriquecido
+        tipo: tipoTexto,
         cantidadConSigno,
         unidad: item.unidad?.abreviatura ?? "",
-        bodega: bodegaTexto,
+        bodega: bodegaTexto || "General",
         lote: item.lote?.codigo ?? null,
         fecha: doc.fecha ? doc.fecha.toISOString() : null,
       };
