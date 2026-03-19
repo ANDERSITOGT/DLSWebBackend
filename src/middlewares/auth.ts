@@ -25,7 +25,7 @@ export const authenticateToken = (req: Request, res: Response, next: NextFunctio
     }
 
     try {
-        // 3. DOBLE VERIFICACIÓN (KILL SWITCH) 🛡️
+        // 3. DOBLE VERIFICACIÓN (KILL SWITCH) 
         // Buscamos al usuario en la BD para ver si sigue activo
         const usuarioActual = await prisma.usuario.findUnique({
             where: { id: decoded.id },

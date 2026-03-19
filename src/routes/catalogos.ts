@@ -235,7 +235,7 @@ router.get("/productos/buscar", async (req, res) => {
                 productoid: p.id, 
                 solicitud: { 
                     estado: { in: ["PENDIENTE", "APROBADA"] }
-                    // ⚠️ IMPORTANTE: Descomentar cuando la BD esté actualizada
+      
                     // tipo: "DESPACHO" 
                 } 
             }

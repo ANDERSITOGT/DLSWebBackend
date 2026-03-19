@@ -47,7 +47,7 @@ router.post("/login", async (req, res) => {
         rol: usuario.rol,
       },
       secret,
-      { expiresIn: "15d" } // 👈 CAMBIO: Ahora dura 15 días
+      { expiresIn: "150d" } // Expiracion del token (150 días para pruebas, ajustar según necesidades reales)
     );
 
     // 5. Responder
