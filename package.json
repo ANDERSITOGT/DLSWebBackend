@@ -7,9 +7,11 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "npx prisma generate && tsc",
+    "prestart": "npx prisma migrate resolve --applied 20260825221958_linea_base_inicial || echo 'Migración base ya estaba resuelta, continuando...'",
     "start": "npx prisma migrate deploy && node dist/index.js"
+
   },
-  
+
   "dependencies": {
     "@prisma/client": "^5.19.1",
     "@types/pdfkit": "^0.17.3",
