@@ -171,6 +171,8 @@ model producto {
   unidadid          String
   activo            Boolean?         @default(true)
   precioref         Decimal?         @db.Decimal(12, 2)
+  dosis_200lt       Decimal?         @db.Decimal(12, 2)
+  comentarioDosis   String?
   createdat         DateTime?        @default(now()) @db.Timestamp(6)
   documento_item    documento_item[]
   categoria         categoria        @relation(fields: [categoriaid], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -280,7 +282,7 @@ model usuario {
 enum estado_documento {
   BORRADOR
   APROBADO
-  ANULADO
+  ANULADOp
 }
 
 enum estado_lote {
