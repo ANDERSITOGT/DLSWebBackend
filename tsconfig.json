@@ -21,7 +21,8 @@
     "skipLibCheck": true,
 
     // ---- Otros ----
-    "sourceMap": true
+    "sourceMap": true,
+    "ignoreDeprecations": "6.0"
   },
   "include": ["src"]
 }
