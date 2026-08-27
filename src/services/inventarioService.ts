@@ -11,6 +11,8 @@ export type InventarioProductoDTO = {
   nombre: string;
   codigo: string;
   detalle: string;
+  dosis_200lt: number | null;
+  comentarioDosis: string | null;
   categoria: string;
   unidad: string;
   stockTotal: string; 
@@ -36,6 +38,8 @@ export type DetalleProductoDTO = {
     nombre: string;
     codigo: string;
     detalle: string;
+    dosis_200lt: number | null;
+    comentarioDosis: string | null;
     categoria: string;
     unidad: string;
     estadoProducto: EstadoProducto;
@@ -160,6 +164,8 @@ export const inventarioService = {
         nombre: p.nombre,
         codigo: p.codigo,
         detalle: p.ingredienteactivo ?? "",
+        dosis_200lt: p.dosis_200lt == null ? null : Number(p.dosis_200lt),
+        comentarioDosis: p.comentarioDosis ?? null,
         categoria: p.categoria?.nombre ?? "",
         unidad: unidadAbrev,
         stockTotal: `${stockNumero} ${unidadAbrev}`.trim(),
@@ -272,6 +278,8 @@ export const inventarioService = {
         nombre: producto.nombre,
         codigo: producto.codigo,
         detalle: producto.ingredienteactivo ?? "",
+        dosis_200lt: producto.dosis_200lt == null ? null : Number(producto.dosis_200lt),
+        comentarioDosis: producto.comentarioDosis ?? null,
         categoria: producto.categoria?.nombre ?? "",
         unidad: unidadAbrev,
         estadoProducto: producto.activo ? "ACTIVO" : "INACTIVO",

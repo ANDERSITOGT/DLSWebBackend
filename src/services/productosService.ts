@@ -6,6 +6,8 @@ interface CreateProductoDTO {
   unidadid: string;
   ingredienteactivo?: string;
   precioref?: number;
+  dosis_200lt?: number;
+  comentarioDosis?: string;
 }
 
 // Nueva interfaz para actualizar productos. Todos los campos son opcionales.
@@ -16,6 +18,8 @@ interface UpdateProductoDTO {
   unidadid?: string;
   ingredienteactivo?: string;
   precioref?: number;
+  dosis_200lt?: number;
+  comentarioDosis?: string;
   activo?: boolean;
 }
 
@@ -60,6 +64,8 @@ const createProducto = async (data: CreateProductoDTO) => {
       unidadid: data.unidadid,
       ingredienteactivo: data.ingredienteactivo || null,
       precioref: data.precioref || null,
+      dosis_200lt: data.dosis_200lt || null,
+      comentarioDosis: data.comentarioDosis || null,
       activo: true,
     },
   });
@@ -94,6 +100,8 @@ const updateProducto = async (id: string, data: UpdateProductoDTO) => {
       unidadid: data.unidadid,
       ingredienteactivo: data.ingredienteactivo,
       precioref: data.precioref,
+      dosis_200lt: data.dosis_200lt,
+      comentarioDosis: data.comentarioDosis,
       activo: data.activo,
     }
   });

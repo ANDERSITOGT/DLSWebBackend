@@ -74,7 +74,7 @@ async function main() {
     email: "admin@dls.com",
     nombre: "Administrador", // Corregido según tu imagen
     password: "$2b$10$9bQMjz4CILML9jBv4.qGbu1o/QDzf9O4dfT52alZwYfH7od9.n/UG",
-    // 👇 AQUÍ ESTA LA CORRECCIÓN: 'as any' para evitar el error de tipo Enum
+    // la contraseña es "admin123" encriptada con bcrypt
     rol: "ADMIN" as any, 
     activo: true
   };

@@ -15,7 +15,9 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
       categoriaid, 
       unidadid, 
       ingredienteactivo,
-      precioref 
+      precioref,
+      dosis_200lt,
+      comentarioDosis
     } = req.body;
 
     // Validacion de entrada (Ya no validamos 'codigo' porque lo generamos nosotros)
@@ -31,7 +33,9 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
       categoriaid,
       unidadid,
       ingredienteactivo,
-      precioref: precioref ? Number(precioref) : undefined
+      precioref: precioref !== undefined ? Number(precioref) : undefined,
+      dosis_200lt: dosis_200lt !== undefined ? Number(dosis_200lt) : undefined,
+      comentarioDosis
     });
 
     res.status(201).json(nuevoProducto);
@@ -56,6 +60,8 @@ router.patch("/:id", authenticateToken, async (req: AuthRequest, res: Response) 
       unidadid,
       ingredienteactivo,
       precioref,
+      dosis_200lt,
+      comentarioDosis,
       activo
     } = req.body;
 
@@ -66,6 +72,8 @@ router.patch("/:id", authenticateToken, async (req: AuthRequest, res: Response) 
       unidadid,
       ingredienteactivo,
       precioref: precioref !== undefined ? Number(precioref) : undefined,
+      dosis_200lt: dosis_200lt !== undefined ? Number(dosis_200lt) : undefined,
+      comentarioDosis,
       activo
     });
 

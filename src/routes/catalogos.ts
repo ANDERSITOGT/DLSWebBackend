@@ -195,6 +195,8 @@ router.get("/productos-busqueda", async (req, res) => {
             nombre: p.nombre,
             codigo: p.codigo,
             precioref: p.precioref,
+            dosis_200lt: p.dosis_200lt,
+            comentarioDosis: p.comentarioDosis,
             unidad: p.unidad,
             stockActual: disponible > 0 ? disponible : 0
         };
