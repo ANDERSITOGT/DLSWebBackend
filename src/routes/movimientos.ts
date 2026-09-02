@@ -352,8 +352,20 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
       const tokensA = new Set(a.split(" ").filter(Boolean));
       const tokensB = new Set(b.split(" ").filter(Boolean));
       const interseccion = [...tokensA].filter((token) => tokensB.has(token));
-      const overlap = interseccion.length / Math.max(tokensA.size, tokensB.size || 1);
-      return Math.round(overlap * 100);
+      const coberturaCatalogo = interseccion.length / Math.max(tokensB.size, 1);
+      const coberturaDescripcion = interseccion.length / Math.max(tokensA.size, 1);
+      const similitudTokens = (coberturaCatalogo * 0.75) + (coberturaDescripcion * 0.25);
+
+      const compactoA = a.replace(/\s/g, "");
+      const compactoB = b.replace(/\s/g, "");
+      const distanciaCompacta = distanciaLevenshtein(compactoA, compactoB);
+      const similitudCompacta = 1 - (distanciaCompacta / Math.max(compactoA.length, compactoB.length, 1));
+      const tokensCatalogoEncontradosCompactos = [...tokensB].filter(
+        (token) => token.length >= 5 && compactoA.includes(token),
+      ).length;
+      const coberturaCatalogoCompacta = tokensCatalogoEncontradosCompactos / Math.max(tokensB.size, 1);
+
+      return Math.round(Math.max(similitudTokens, similitudCompacta, coberturaCatalogoCompacta) * 100);
     };
 
     let proveedorEncontrado: { id: string; nombre: string; nit?: string | null } | null = null;
@@ -426,8 +438,8 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
               const nombreNormalizado = normalizarTextoBusqueda(producto.nombre);
               const distancia = distanciaLevenshtein(descripcionNormalizada, nombreNormalizado);
               const similitudLevenshtein = 1 - (distancia / Math.max(descripcionNormalizada.length, nombreNormalizado.length, 1));
-              const similitudTokens = calcularCoincidencia(descripcion, producto.nombre) / 100;
-              const score = Math.max(similitudLevenshtein, similitudTokens);
+              const similitudCatalogo = calcularCoincidencia(descripcion, producto.nombre) / 100;
+              const score = Math.max(similitudLevenshtein, similitudCatalogo);
 
               return {
                 ...producto,
