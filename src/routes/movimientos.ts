@@ -1,7 +1,6 @@
 import { Router, Response } from "express";
 import multer from "multer";
 import OpenAI from "openai";
-import sharp from "sharp";
 import prisma from "../prisma";
 import { authenticateToken, AuthRequest } from "../middlewares/auth";
 import { movimientosService } from "../services/movimientosService";
@@ -232,25 +231,10 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
       return res.status(400).json({ message: "Solo se permiten imágenes en formato PNG o JPG para el escaneo." });
     }
 
-    const originalSize = req.file.size || req.file.buffer.length;
-    const optimizedBuffer = await sharp(req.file.buffer)
-      .resize({
-        width: 1200,
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .jpeg({
-        quality: 80,
-        mozjpeg: true,
-      })
-      .toBuffer();
-
-    const optimizedSize = optimizedBuffer.length;
-    const ahorroPorcentaje = originalSize > 0 ? ((1 - optimizedSize / originalSize) * 100) : 0;
-    console.log(`[OCR] Imagen original: ${(originalSize / 1024).toFixed(2)} KB -> optimizada: ${(optimizedSize / 1024).toFixed(2)} KB (${ahorroPorcentaje.toFixed(1)}% ahorro)`);
-
-    const base64Data = optimizedBuffer.toString("base64");
-    const mimeType = "image/jpeg";
+    // Mantener la imagen original para evitar pérdida de legibilidad en OCR, especialmente en facturas/recibos con texto pequeño.
+    // Si luego quieres optimizar, conviene hacerlo con un resize muy ligero y sin reducir demasiado la calidad.
+    const base64Data = req.file.buffer.toString("base64");
+    const mimeType = req.file.mimetype === "image/png" ? "image/png" : "image/jpeg";
     const dataUrl = `data:${mimeType};base64,${base64Data}`;
 
     const completion = await openai.chat.completions.create({
