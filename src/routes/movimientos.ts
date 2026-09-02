@@ -239,12 +239,46 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
 
     const completion = await openai.chat.completions.create({
       model: openAiModel,
-      response_format: { type: "json_object" },
+      temperature: 0,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "factura_ocr_result",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              serie: { type: ["string", "null"] },
+              numero: { type: ["string", "null"] },
+              fecha: { type: ["string", "null"] },
+              proveedor: { type: ["string", "null"] },
+              tipo: { type: ["string", "null"] },
+              observaciones: { type: ["string", "null"] },
+              items: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    descripcion: { type: ["string", "null"] },
+                    cantidad: { type: ["number", "null"] },
+                    precioUnitario: { type: ["number", "null"] },
+                    subtotal: { type: ["number", "null"] },
+                  },
+                  required: ["descripcion", "cantidad", "precioUnitario", "subtotal"],
+                },
+              },
+            },
+            required: ["serie", "numero", "fecha", "proveedor", "tipo", "observaciones", "items"],
+          },
+        },
+      },
       messages: [
         {
           role: "system",
           content:
-            "Eres un experto en extracción de datos de facturas y recibos agrícolas. Devuelve únicamente un objeto JSON válido con la estructura exacta que te indico. Si no existe un dato, usa null. No escribas texto adicional, ni Markdown, ni explicaciones.",
+            "Eres un extractor de documentos de facturas y recibos agrícolas. Lee la imagen con máxima precisión. Devuelve SOLO un JSON válido que cumpla exactamente el esquema indicado. No escribas texto adicional, ni markdown, ni explicaciones. Si un valor no se ve claramente, usa null. No inventes datos. Para proveedor y descripcion, conserva el texto tal como aparece en la factura. Para cantidad, precioUnitario y subtotal usa números reales, no strings. Mantén el orden de los items según la factura.",
         },
         {
           role: "user",
@@ -252,18 +286,19 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
             {
               type: "text",
               text:
-                "Analiza la imagen adjunta y devuelve EXACTAMENTE este objeto JSON: { \"serie\": \"string\", \"numero\": \"string\", \"fecha\": \"YYYY-MM-DD\", \"proveedor\": \"Nombre del proveedor o emisor\", \"tipo\": \"factura\" o \"recibo\", \"observaciones\": \"string\", \"items\": [ { \"descripcion\": \"Nombre del producto agrícola\", \"cantidad\": 0, \"precioUnitario\": 0, \"subtotal\": 0 } ] }. Asegúrate de devolver un JSON válido, no texto libre."
+                "Analiza la factura o recibo adjunto con atención a las columnas y al orden de las filas. Lee primero la cabecera para obtener proveedor, numero, serie y fecha. Luego extrae los items en el mismo orden en que aparecen en la factura. Mantén los nombres exactos de los productos y del proveedor tal como aparecen en la factura; no los reordenes ni los cambies. Si no se ve claramente un campo, usa null. Devuelve SOLO este JSON exacto: { \"serie\": \"string o null\", \"numero\": \"string o null\", \"fecha\": \"YYYY-MM-DD o null\", \"proveedor\": \"string o null\", \"tipo\": \"factura\" o \"recibo\" o null, \"observaciones\": \"string o null\", \"items\": [{ \"descripcion\": \"string o null\", \"cantidad\": 0, \"precioUnitario\": 0, \"subtotal\": 0 }] }."
             },
             {
               type: "image_url",
               image_url: {
                 url: dataUrl,
+                detail: "high",
               },
             },
           ],
         },
       ],
-      max_tokens: 1500,
+      max_tokens: 2000,
     });
 
     const rawResponse = completion.choices[0]?.message?.content;
@@ -271,11 +306,27 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
       return res.status(500).json({ message: "La IA no devolvió contenido." });
     }
 
+    const repararJsonOpenAI = (texto: string) => {
+      let limpio = texto.trim();
+      limpio = limpio.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+
+      const inicio = limpio.indexOf("{");
+      const fin = limpio.lastIndexOf("}");
+      if (inicio !== -1 && fin !== -1 && fin > inicio) {
+        limpio = limpio.slice(inicio, fin + 1);
+      }
+
+      limpio = limpio.replace(/,\s*([}\]])/g, "$1");
+      limpio = limpio.replace(/([{,]\s*)([A-Za-z0-9_]+)(\s*:)/g, '$1"$2"$3');
+
+      return limpio;
+    };
+
     console.log("OpenAI raw response:", rawResponse);
 
     let datosExtraidos;
     try {
-      datosExtraidos = JSON.parse(rawResponse);
+      datosExtraidos = JSON.parse(repararJsonOpenAI(rawResponse));
       console.log("OpenAI parsed JSON:", JSON.stringify(datosExtraidos, null, 2));
     } catch (parseError: any) {
       console.error("Error parseando JSON recibido de OpenAI:", rawResponse);
@@ -464,11 +515,13 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
       serie: datosExtraidos?.serie ?? null,
       numero: datosExtraidos?.numero ?? null,
       fecha: datosExtraidos?.fecha ?? null,
-      proveedor: proveedorEncontrado
-        ? { id: proveedorEncontrado.id, nombre: proveedorEncontrado.nombre, nit: proveedorEncontrado.nit ?? null }
-        : (datosExtraidos?.proveedor ?? null),
+      proveedor: datosExtraidos?.proveedor
+        ? datosExtraidos.proveedor
+        : (proveedorEncontrado
+          ? { id: proveedorEncontrado.id, nombre: proveedorEncontrado.nombre, nit: proveedorEncontrado.nit ?? null }
+          : null),
       proveedorId: proveedorEncontrado?.id ?? null,
-      proveedorNombre: proveedorEncontrado?.nombre ?? datosExtraidos?.proveedor ?? null,
+      proveedorNombre: datosExtraidos?.proveedor ?? proveedorEncontrado?.nombre ?? null,
       tipo: datosExtraidos?.tipo ?? null,
       observaciones: datosExtraidos?.observaciones ?? null,
       items: itemsConProducto,
