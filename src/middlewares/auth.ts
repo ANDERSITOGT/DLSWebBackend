@@ -4,6 +4,7 @@ import prisma from '../prisma'; // 👈 Necesitamos importar Prisma aquí
 
 export interface AuthRequest extends Request {
   user?: any;
+  file?: Express.Multer.File;
 }
 
 export const authenticateToken = (req: Request, res: Response, next: NextFunction) => {

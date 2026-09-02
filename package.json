@@ -3,14 +3,11 @@
   "version": "1.0.0",
   "description": "Backend para sistema de inventarios DLS",
   "main": "dist/index.js",
-
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "npx prisma generate && tsc",
     "start": "npx prisma migrate deploy && node dist/index.js"
-
   },
-
   "dependencies": {
     "@prisma/client": "^5.19.1",
     "@types/pdfkit": "^0.17.3",
@@ -19,6 +16,8 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.3.0",
+    "openai": "^7.8.0",
     "pdfkit": "^0.17.2"
   },
   "devDependencies": {
@@ -27,6 +26,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.5",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.2.0",
     "@types/node": "^24.10.1",
     "prisma": "^5.19.1",
     "ts-node": "^10.9.2",
