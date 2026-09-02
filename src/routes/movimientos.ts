@@ -410,7 +410,7 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
       },
     });
 
-    const itemsConProducto = await Promise.all(
+    const itemsConProducto = (await Promise.all(
       itemsBase.map(async (item: any) => {
         const descripcion = String(item?.descripcion ?? "").trim();
         const cantidad = Number(item?.cantidad ?? 0);
@@ -453,19 +453,23 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
           }
         }
 
+        if (!productoCoincidente) {
+          console.log("[OCR] Línea omitida por no encontrar coincidencia en el catálogo:", descripcion);
+          return null;
+        }
+
         return {
           descripcion,
           cantidad,
           precioUnitario,
           subtotal,
-          productoId: productoCoincidente?.id ?? null,
-          productoNombre: productoCoincidente?.nombre ?? null,
-          productoCodigo: productoCoincidente?.codigo ?? null,
-          precioBase: productoCoincidente?.precioref != null ? Number(productoCoincidente.precioref) : null,
-          esLibre: !productoCoincidente,
+          productoId: productoCoincidente.id,
+          productoNombre: productoCoincidente.nombre,
+          productoCodigo: productoCoincidente.codigo,
+          precioBase: productoCoincidente.precioref != null ? Number(productoCoincidente.precioref) : null,
         };
       })
-    );
+    )).filter((item): item is NonNullable<typeof item> => item !== null);
 
     const idsProductosEncontrados = itemsConProducto
       .filter((item) => item.productoId)
