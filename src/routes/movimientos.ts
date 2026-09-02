@@ -1,6 +1,7 @@
 import { Router, Response } from "express";
 import multer from "multer";
 import OpenAI from "openai";
+import sharp from "sharp";
 import prisma from "../prisma";
 import { authenticateToken, AuthRequest } from "../middlewares/auth";
 import { movimientosService } from "../services/movimientosService";
@@ -22,7 +23,7 @@ const upload = multer({
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || "",
 });
-const openAiModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const openAiModel = process.env.OPENAI_MODEL || "gpt-4o";
 
 // ---------------------------------------------------------------------
 // FUNCIÓN AUXILIAR: CALCULAR MODA
@@ -46,49 +47,28 @@ function calcularModa(precios: number[]): number {
   return moda;
 }
 
-function corregirCantidadDesdeSubtotal(item: any) {
-  if (!item || typeof item !== "object") return item;
+function normalizarNit(valor?: string | null): string {
+  return (valor ?? "").toString().replace(/[^0-9]/g, "");
+}
 
-  const cantidadOriginal = Number(item?.cantidad ?? 0);
-  const precioUnitario = Number(item?.precioUnitario ?? 0);
-  const subtotal = Number(item?.subtotal ?? 0);
+function distanciaLevenshtein(a: string, b: string): number {
+  const filaInicial = Array.from({ length: b.length + 1 }, (_, indice) => indice);
+  let filaAnterior = filaInicial;
 
-  if (!Number.isFinite(cantidadOriginal) || !Number.isFinite(precioUnitario) || !Number.isFinite(subtotal)) {
-    return item;
+  for (let indiceA = 1; indiceA <= a.length; indiceA++) {
+    const filaActual = [indiceA];
+    for (let indiceB = 1; indiceB <= b.length; indiceB++) {
+      const costo = a[indiceA - 1] === b[indiceB - 1] ? 0 : 1;
+      filaActual[indiceB] = Math.min(
+        filaActual[indiceB - 1] + 1,
+        filaAnterior[indiceB] + 1,
+        filaAnterior[indiceB - 1] + costo,
+      );
+    }
+    filaAnterior = filaActual;
   }
 
-  if (precioUnitario <= 0 || subtotal <= 0) {
-    return item;
-  }
-
-  const cantidadCalculada = subtotal / precioUnitario;
-  const diferencia = Math.abs(cantidadCalculada - cantidadOriginal);
-  const cantidadPareceSospechosa = cantidadOriginal <= 1 || diferencia > 0.5;
-
-  if (!cantidadPareceSospechosa) {
-    return item;
-  }
-
-  if (!Number.isFinite(cantidadCalculada) || cantidadCalculada <= 0) {
-    return item;
-  }
-
-  const cantidadRedondeada = Math.round(cantidadCalculada);
-  const diferenciaRedondeada = Math.abs(cantidadCalculada - cantidadRedondeada);
-
-  if (cantidadRedondeada >= 1 && diferenciaRedondeada <= 0.05) {
-    console.log("🧮 [OCR] Cantidad corregida por relación subtotal/precio:", {
-      descripcion: item?.descripcion ?? "Sin descripción",
-      cantidadOriginal,
-      precioUnitario,
-      subtotal,
-      cantidadCalculada,
-      cantidadRedondeada,
-    });
-    item.cantidad = cantidadRedondeada;
-  }
-
-  return item;
+  return filaAnterior[b.length];
 }
 
 // ==========================================
@@ -231,10 +211,23 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
       return res.status(400).json({ message: "Solo se permiten imágenes en formato PNG o JPG para el escaneo." });
     }
 
-    // Mantener la imagen original para evitar pérdida de legibilidad en OCR, especialmente en facturas/recibos con texto pequeño.
-    // Si luego quieres optimizar, conviene hacerlo con un resize muy ligero y sin reducir demasiado la calidad.
-    const base64Data = req.file.buffer.toString("base64");
-    const mimeType = req.file.mimetype === "image/png" ? "image/png" : "image/jpeg";
+    const metadata = await sharp(req.file.buffer).metadata();
+    const anchoOriginal = metadata.width ?? 0;
+    const debeReducir = anchoOriginal > 2200;
+    const imagenParaOpenAI = debeReducir
+      ? await sharp(req.file.buffer)
+        .resize({ width: 2200, fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 90, mozjpeg: true })
+        .toBuffer()
+      : req.file.buffer;
+    const mimeType = debeReducir ? "image/jpeg" : req.file.mimetype;
+
+    if (debeReducir) {
+      const ahorroPorcentaje = ((1 - imagenParaOpenAI.length / req.file.buffer.length) * 100).toFixed(1);
+      console.log(`[OCR] Imagen reducida de ${anchoOriginal}px: ${(req.file.buffer.length / 1024).toFixed(2)} KB -> ${(imagenParaOpenAI.length / 1024).toFixed(2)} KB (${ahorroPorcentaje}% ahorro)`);
+    }
+
+    const base64Data = imagenParaOpenAI.toString("base64");
     const dataUrl = `data:${mimeType};base64,${base64Data}`;
 
     const completion = await openai.chat.completions.create({
@@ -253,6 +246,7 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
               numero: { type: ["string", "null"] },
               fecha: { type: ["string", "null"] },
               proveedor: { type: ["string", "null"] },
+              nit: { type: ["string", "null"] },
               tipo: { type: ["string", "null"] },
               observaciones: { type: ["string", "null"] },
               items: {
@@ -270,7 +264,7 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
                 },
               },
             },
-            required: ["serie", "numero", "fecha", "proveedor", "tipo", "observaciones", "items"],
+            required: ["serie", "numero", "fecha", "proveedor", "nit", "tipo", "observaciones", "items"],
           },
         },
       },
@@ -278,7 +272,7 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
         {
           role: "system",
           content:
-            "Eres un extractor de documentos de facturas y recibos agrícolas. Lee la imagen con máxima precisión. Devuelve SOLO un JSON válido que cumpla exactamente el esquema indicado. No escribas texto adicional, ni markdown, ni explicaciones. Si un valor no se ve claramente, usa null. No inventes datos. Para proveedor y descripcion, conserva el texto tal como aparece en la factura. Para cantidad, precioUnitario y subtotal usa números reales, no strings. Mantén el orden de los items según la factura.",
+            "Eres un extractor de documentos de facturas y recibos agrícolas. Lee la imagen con máxima precisión. Devuelve SOLO un JSON válido que cumpla exactamente el esquema indicado. No escribas texto adicional, ni markdown, ni explicaciones. Si un valor no se ve claramente, usa null. No inventes datos. IMPORTANTE: NO recalcules los subtotales ni inventes matemáticas. Extrae EXACTAMENTE los dígitos impresos en el papel, carácter por carácter. Los precios tienen formato de moneda con 'Q' y comas para miles (ej. 'Q 1,274.36'). Elimina la 'Q' y TODAS las comas antes de generar el JSON (debe ser el número 1274.36). NUNCA trunques los decimales ni los miles. Lee la tabla de productos de forma estrictamente horizontal fila por fila para no mezclar precios. Hay mucho espacio en blanco entre la descripción y los precios. Guíate estrictamente por las columnas: La primera columna a la izquierda es CANTIDAD. La penúltima columna es PRECIO UNITARIO. La última columna a la derecha es VALOR (subtotal). Para cada fila, toma cantidad, descripcion, precioUnitario y subtotal de la misma línea visual. IMPORTANTE - MANEJO DE DISTORSIONES: La imagen puede estar tomada en ángulo, el papel puede estar doblado o tener marcas de agua gigantes (como la palabra 'COPIA' en rojo cruzando la tabla). IGNORA por completo cualquier marca de agua o sello sobrepuesto. Sigue la alineación de las filas con extrema precaución. Traza una línea horizontal imaginaria desde la descripción del producto hasta su precio exacto, compensando cualquier inclinación de la foto. Asegúrate de extraer TODAS las filas. No omitas el último producto de la lista, aunque sea WINNER LT. Extrae el NIT del emisor, no el NIT del cliente. Para proveedor y descripcion, conserva el texto tal como aparece en la factura. Para cantidad, precioUnitario y subtotal usa números reales, no strings. Mantén el orden de los items según la factura.",
         },
         {
           role: "user",
@@ -286,7 +280,7 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
             {
               type: "text",
               text:
-                "Analiza la factura o recibo adjunto con atención a las columnas y al orden de las filas. Lee primero la cabecera para obtener proveedor, numero, serie y fecha. Luego extrae los items en el mismo orden en que aparecen en la factura. Mantén los nombres exactos de los productos y del proveedor tal como aparecen en la factura; no los reordenes ni los cambies. Si no se ve claramente un campo, usa null. Devuelve SOLO este JSON exacto: { \"serie\": \"string o null\", \"numero\": \"string o null\", \"fecha\": \"YYYY-MM-DD o null\", \"proveedor\": \"string o null\", \"tipo\": \"factura\" o \"recibo\" o null, \"observaciones\": \"string o null\", \"items\": [{ \"descripcion\": \"string o null\", \"cantidad\": 0, \"precioUnitario\": 0, \"subtotal\": 0 }] }."
+                "Analiza la factura o recibo adjunto con atención a las columnas y al orden de las filas. Lee primero la cabecera para obtener proveedor, NIT del emisor, numero, serie y fecha. Luego extrae los items en el mismo orden en que aparecen en la factura. IMPORTANTE: copia el NIT exacto sin añadir números extra. Los precios tienen formato de moneda con 'Q' y comas para miles (ej. 'Q 1,274.36'). Elimina la 'Q' y TODAS las comas antes de generar el JSON (debe ser el número 1274.36). NUNCA trunques los decimales ni los miles. Hay mucho espacio en blanco entre la descripción y los precios. Guíate estrictamente por las columnas: la primera columna a la izquierda es CANTIDAD, la penúltima es PRECIO UNITARIO y la última a la derecha es VALOR (subtotal). Para la tabla de items, no inventes ceros ni corrijas los valores totales. No recalcules cantidades, precios ni subtotales. Lee cada fila horizontalmente y asocia únicamente los cuatro valores de esa misma línea visual. Mantén los nombres exactos de los productos y del proveedor tal como aparecen en la factura; no los reordenes ni los cambies. Si no se ve claramente un campo, usa null. Devuelve SOLO este JSON exacto: { \"serie\": \"string o null\", \"numero\": \"string o null\", \"fecha\": \"YYYY-MM-DD o null\", \"proveedor\": \"string o null\", \"nit\": \"string o null\", \"tipo\": \"factura\" o \"recibo\" o null, \"observaciones\": \"string o null\", \"items\": [{ \"descripcion\": \"string o null\", \"cantidad\": 0, \"precioUnitario\": 0, \"subtotal\": 0 }] }."
             },
             {
               type: "image_url",
@@ -344,7 +338,6 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
         .replace(/[\u0300-\u036f]/g, "")
         .replace(/[^a-zA-Z0-9\s]/g, " ")
         .replace(/\b(kg|kilos|kilogramo|kilogramo|l|lt|lts|litros|litro|ml|gr|g|gramos|gramo|saco|sacos|bolsa|bolsas|frasco|frascos|rollo|rollos|unidad|unidades)\b/gi, " ")
-        .replace(/\b\d+(?:[.,]\d+)?\b/g, " ")
         .replace(/\s+/g, " ")
         .trim()
         .toLowerCase();
@@ -355,7 +348,6 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
 
       if (!a || !b) return 0;
       if (a === b) return 100;
-      if (a.includes(b) || b.includes(a)) return 90;
 
       const tokensA = new Set(a.split(" ").filter(Boolean));
       const tokensB = new Set(b.split(" ").filter(Boolean));
@@ -366,55 +358,57 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
 
     let proveedorEncontrado: { id: string; nombre: string; nit?: string | null } | null = null;
     const proveedorTexto = String(datosExtraidos?.proveedor ?? "").trim();
+    const nitExtraido = normalizarNit(datosExtraidos?.nit);
 
-    if (proveedorTexto) {
-      const proveedoresCoincidentes = await prisma.proveedor.findMany({
-        where: {
-          nombre: { contains: proveedorTexto, mode: "insensitive" },
-        },
-        select: { id: true, nombre: true, nit: true },
-        take: 10,
-      });
+    const proveedoresCatalogo = await prisma.proveedor.findMany({
+      select: { id: true, nombre: true, nit: true },
+    });
 
-      if (proveedoresCoincidentes.length > 0) {
-        proveedorEncontrado = proveedoresCoincidentes
-          .map((proveedor) => ({
-            ...proveedor,
-            score: calcularCoincidencia(proveedorTexto, proveedor.nombre),
-          }))
-          .sort((a, b) => b.score - a.score)[0];
-      }
-
-      if (!proveedorEncontrado) {
-        const proveedoresCatalogo = await prisma.proveedor.findMany({
-          select: { id: true, nombre: true, nit: true },
-          take: 100,
-        });
-
-        const mejorProveedor = proveedoresCatalogo
-          .map((proveedor) => ({
-            ...proveedor,
-            score: calcularCoincidencia(proveedorTexto, proveedor.nombre),
-          }))
-          .sort((a, b) => b.score - a.score)[0];
-
-        if (mejorProveedor && mejorProveedor.score >= 35) {
-          proveedorEncontrado = {
-            id: mejorProveedor.id,
-            nombre: mejorProveedor.nombre,
-            nit: mejorProveedor.nit,
-          };
-        }
-      }
-
-      console.log("🔎 [OCR] Resultado de búsqueda del proveedor:", proveedorEncontrado
-        ? { id: proveedorEncontrado.id, nombre: proveedorEncontrado.nombre, nit: proveedorEncontrado.nit }
-        : null);
+    if (nitExtraido) {
+      proveedorEncontrado = proveedoresCatalogo.find(
+        (proveedor) => normalizarNit(proveedor.nit) === nitExtraido,
+      ) ?? null;
     }
 
+    if (!proveedorEncontrado && proveedorTexto) {
+      const proveedoresOrdenados = proveedoresCatalogo
+        .map((proveedor) => ({
+          ...proveedor,
+          score: calcularCoincidencia(proveedorTexto, proveedor.nombre),
+        }))
+        .sort((a, b) => b.score - a.score);
+      const mejorProveedor = proveedoresOrdenados[0];
+      const segundoProveedor = proveedoresOrdenados[1];
+
+      if (mejorProveedor && mejorProveedor.score >= 70 &&
+          (!segundoProveedor || mejorProveedor.score - segundoProveedor.score >= 10)) {
+        proveedorEncontrado = {
+          id: mejorProveedor.id,
+          nombre: mejorProveedor.nombre,
+          nit: mejorProveedor.nit,
+        };
+      }
+    }
+
+    console.log("🔎 [OCR] Resultado de búsqueda del proveedor:", {
+      nitExtraido: nitExtraido || null,
+      proveedorEncontrado: proveedorEncontrado
+        ? { id: proveedorEncontrado.id, nombre: proveedorEncontrado.nombre, nit: proveedorEncontrado.nit }
+        : null,
+    });
+
     const itemsBase = Array.isArray(datosExtraidos?.items)
-      ? datosExtraidos.items.map((item: any) => corregirCantidadDesdeSubtotal(item))
+      ? datosExtraidos.items
       : [];
+
+    const catalogoProductos = await prisma.producto.findMany({
+      select: {
+        id: true,
+        nombre: true,
+        codigo: true,
+        precioref: true,
+      },
+    });
 
     const itemsConProducto = await Promise.all(
       itemsBase.map(async (item: any) => {
@@ -426,68 +420,36 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
         let productoCoincidente: { id: string; nombre: string; codigo: string; precioref: number | null } | null = null;
 
         if (descripcion) {
-          const productosCoincidentes = await prisma.producto.findMany({
-            where: {
-              OR: [
-                { nombre: { contains: descripcion, mode: "insensitive" } },
-                { codigo: { contains: descripcion, mode: "insensitive" } },
-              ],
-            },
-            select: {
-              id: true,
-              nombre: true,
-              codigo: true,
-              precioref: true,
-            },
-            take: 10,
-          });
+          const descripcionNormalizada = normalizarTextoBusqueda(descripcion);
+          const productosOrdenados = catalogoProductos
+            .map((producto) => {
+              const nombreNormalizado = normalizarTextoBusqueda(producto.nombre);
+              const distancia = distanciaLevenshtein(descripcionNormalizada, nombreNormalizado);
+              const similitudLevenshtein = 1 - (distancia / Math.max(descripcionNormalizada.length, nombreNormalizado.length, 1));
+              const similitudTokens = calcularCoincidencia(descripcion, producto.nombre) / 100;
+              const score = Math.max(similitudLevenshtein, similitudTokens);
 
-          if (productosCoincidentes.length > 0) {
-            const mejorProducto = productosCoincidentes
-              .map((producto) => ({
+              return {
                 ...producto,
-                score: calcularCoincidencia(descripcion, producto.nombre),
+                score,
                 precioref: producto.precioref != null ? Number(producto.precioref) : null,
-              }))
-              .sort((a, b) => b.score - a.score)[0];
-
-            if (mejorProducto) {
-              productoCoincidente = {
-                id: mejorProducto.id,
-                nombre: mejorProducto.nombre,
-                codigo: mejorProducto.codigo,
-                precioref: mejorProducto.precioref,
               };
-            }
-          }
+            })
+            .sort((a, b) => b.score - a.score);
 
-          if (!productoCoincidente) {
-            const catalogoProductos = await prisma.producto.findMany({
-              select: {
-                id: true,
-                nombre: true,
-                codigo: true,
-                precioref: true,
-              },
-              take: 200,
-            });
+          const mejorProducto = productosOrdenados[0];
+          const segundoProducto = productosOrdenados[1];
 
-            const mejorProducto = catalogoProductos
-              .map((producto) => ({
-                ...producto,
-                score: calcularCoincidencia(descripcion, producto.nombre),
-                precioref: producto.precioref != null ? Number(producto.precioref) : null,
-              }))
-              .sort((a, b) => b.score - a.score)[0];
+            console.log("🔍 [Match Debug] Evaluando:", descripcion, "| Mejor candidato:", mejorProducto?.nombre, "| Score:", mejorProducto?.score);
 
-            if (mejorProducto && mejorProducto.score >= 35) {
-              productoCoincidente = {
-                id: mejorProducto.id,
-                nombre: mejorProducto.nombre,
-                codigo: mejorProducto.codigo,
-                precioref: mejorProducto.precioref,
-              };
-            }
+              if (mejorProducto && mejorProducto.score >= 0.65 &&
+                (!segundoProducto || mejorProducto.score - segundoProducto.score >= 0.03)) {
+            productoCoincidente = {
+              id: mejorProducto.id,
+              nombre: mejorProducto.nombre,
+              codigo: mejorProducto.codigo,
+              precioref: mejorProducto.precioref,
+            };
           }
         }
 
@@ -515,6 +477,7 @@ router.post("/escanear", authenticateToken, upload.single("documento"), async (r
       serie: datosExtraidos?.serie ?? null,
       numero: datosExtraidos?.numero ?? null,
       fecha: datosExtraidos?.fecha ?? null,
+      nit: datosExtraidos?.nit ?? null,
       proveedor: datosExtraidos?.proveedor
         ? datosExtraidos.proveedor
         : (proveedorEncontrado
