@@ -1,9 +1,3 @@
-/*
-  Warnings:
-
-  - You are about to drop the `Producto` table. If the table is not empty, all the data it contains will be lost.
-
-*/
 -- CreateEnum
 CREATE TYPE "estado_documento" AS ENUM ('BORRADOR', 'APROBADO', 'ANULADO');
 
@@ -19,8 +13,8 @@ CREATE TYPE "rol" AS ENUM ('ADMIN', 'BODEGUERO', 'SOLICITANTE', 'VISOR');
 -- CreateEnum
 CREATE TYPE "tipo_documento" AS ENUM ('INGRESO', 'SALIDA', 'TRANSFERENCIA', 'AJUSTE', 'DEVOLUCION', 'SOLICITUD');
 
--- DropTable
-DROP TABLE "Producto";
+-- CreateEnum
+CREATE TYPE "tipo_solicitud" AS ENUM ('DESPACHO', 'DEVOLUCION');
 
 -- CreateTable
 CREATE TABLE "auditoria" (
@@ -158,10 +152,20 @@ CREATE TABLE "lote" (
 );
 
 -- CreateTable
+CREATE TABLE "lote_encargado" (
+    "id" TEXT NOT NULL DEFAULT (gen_random_uuid())::text,
+    "loteid" TEXT NOT NULL,
+    "usuarioid" TEXT NOT NULL,
+    "createdat" TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "lote_encargado_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "producto" (
     "id" TEXT NOT NULL DEFAULT gen_random_uuid(),
     "codigo" TEXT NOT NULL,
-    "codigoalt" TEXT,
+    "codigoalt" INTEGER,
     "nombre" TEXT NOT NULL,
     "ingredienteactivo" TEXT,
     "categoriaid" TEXT NOT NULL,
@@ -208,6 +212,8 @@ CREATE TABLE "solicitud" (
     "aprobadorid" TEXT,
     "documentosalidaid" TEXT,
     "createdat" TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP,
+    "solicitud_origen_id" TEXT,
+    "tipo" "tipo_solicitud" NOT NULL DEFAULT 'DESPACHO',
 
     CONSTRAINT "solicitud_pkey" PRIMARY KEY ("id")
 );
@@ -291,7 +297,13 @@ CREATE UNIQUE INDEX "finca_nombre_key" ON "finca"("nombre");
 CREATE UNIQUE INDEX "lote_fincaid_codigo_key" ON "lote"("fincaid", "codigo");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "lote_encargado_unique" ON "lote_encargado"("loteid", "usuarioid");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "producto_codigo_key" ON "producto"("codigo");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "producto_codigoalt_key" ON "producto"("codigoalt");
 
 -- CreateIndex
 CREATE INDEX "idx_producto_nombre" ON "producto"("nombre");
@@ -301,6 +313,9 @@ CREATE UNIQUE INDEX "proveedor_nombre_key" ON "proveedor"("nombre");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "solicitud_documentosalidaid_key" ON "solicitud"("documentosalidaid");
+
+-- CreateIndex
+CREATE INDEX "idx_solicitud_origen" ON "solicitud"("solicitud_origen_id");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ubicacion_bodegaid_codigo_key" ON "ubicacion"("bodegaid", "codigo");
@@ -354,6 +369,12 @@ ALTER TABLE "lote" ADD CONSTRAINT "lote_cultivoid_fkey" FOREIGN KEY ("cultivoid"
 ALTER TABLE "lote" ADD CONSTRAINT "lote_fincaid_fkey" FOREIGN KEY ("fincaid") REFERENCES "finca"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
 
 -- AddForeignKey
+ALTER TABLE "lote_encargado" ADD CONSTRAINT "lote_encargado_lote_fkey" FOREIGN KEY ("loteid") REFERENCES "lote"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+
+-- AddForeignKey
+ALTER TABLE "lote_encargado" ADD CONSTRAINT "lote_encargado_usuario_fkey" FOREIGN KEY ("usuarioid") REFERENCES "usuario"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+
+-- AddForeignKey
 ALTER TABLE "producto" ADD CONSTRAINT "producto_categoriaid_fkey" FOREIGN KEY ("categoriaid") REFERENCES "categoria"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
 
 -- AddForeignKey
@@ -373,6 +394,9 @@ ALTER TABLE "solicitud" ADD CONSTRAINT "solicitud_documentosalidaid_fkey" FOREIG
 
 -- AddForeignKey
 ALTER TABLE "solicitud" ADD CONSTRAINT "solicitud_solicitanteid_fkey" FOREIGN KEY ("solicitanteid") REFERENCES "usuario"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+
+-- AddForeignKey
+ALTER TABLE "solicitud" ADD CONSTRAINT "solicitud_solicitud_origen_id_fkey" FOREIGN KEY ("solicitud_origen_id") REFERENCES "solicitud"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
 
 -- AddForeignKey
 ALTER TABLE "solicitud_item" ADD CONSTRAINT "solicitud_item_loteid_fkey" FOREIGN KEY ("loteid") REFERENCES "lote"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
