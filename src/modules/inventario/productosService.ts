@@ -1,4 +1,4 @@
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
 
 interface CreateProductoDTO {
   nombre: string;

@@ -1,4 +1,11 @@
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
+import {
+  ESTADO_DOCUMENTO_APROBADO,
+  TIPO_DOCUMENTO_AJUSTE,
+  TIPO_DOCUMENTO_DEVOLUCION,
+  TIPO_DOCUMENTO_INGRESO,
+  TIPO_DOCUMENTO_SALIDA,
+} from "../../core/constants";
 
 // ===============================
 // Tipos
@@ -13,15 +20,15 @@ export type InventarioProductoDTO = {
   detalle: string;
   categoria: string;
   unidad: string;
-  stockTotal: string; 
+  stockTotal: string;
   estadoProducto: EstadoProducto;
   estadoStock: EstadoStock;
 };
 
 export type MovimientoDetalleDTO = {
   id: string;
-  documentoId: string;   
-  documentoUuid: string; 
+  documentoId: string;
+  documentoUuid: string;
   tipo: string;
   cantidadConSigno: string;
   unidad: string;
@@ -59,7 +66,7 @@ export type CategoriaFiltroDTO = {
 // ===============================
 function calcularEstadoStock(cantidad: number): EstadoStock {
   if (cantidad <= 50) return "Crítico";
-  if (cantidad <= 100) return "Bajo"; 
+  if (cantidad <= 100) return "Bajo";
   return "Normal";
 }
 
@@ -72,12 +79,12 @@ function numeroDesdeDecimal(value: any): number {
 // Servicio principal
 // ===============================
 export const inventarioService = {
-  
+
   // --------------------------------------------------
   // 1. LISTADO OPTIMIZADO (Server-Side Filtering)
   // --------------------------------------------------
   async getListadoProductos(opciones?: { limit?: number; search?: string; categoria?: string }): Promise<InventarioProductoDTO[]> {
-    
+
     // A. Construir Filtros (WHERE)
     const whereClause: any = {};
 
@@ -95,7 +102,7 @@ export const inventarioService = {
     // B. Definir Ordenamiento (ORDER BY)
     // Estrategia: Si el usuario NO busca nada, le mostramos lo que más se mueve.
     let orderByClause: any = { nombre: 'asc' };
-    
+
     if (!opciones?.search && !opciones?.categoria) {
         // "Los más usados": Ordenar por cantidad de movimientos en el historial
         orderByClause = { documento_item: { _count: 'desc' } };
@@ -120,7 +127,7 @@ export const inventarioService = {
     const items = await prisma.documento_item.findMany({
       where: {
           productoid: { in: productIds }, // Optimización vital
-          documento: { estado: "APROBADO" }
+          documento: { estado: ESTADO_DOCUMENTO_APROBADO }
       },
       select: {
           productoid: true,
@@ -138,10 +145,10 @@ export const inventarioService = {
       const qty = numeroDesdeDecimal(item.cantidad);
       let signo = 0;
 
-      if (doc.tipo === "INGRESO") signo = 1;
-      else if (doc.tipo === "SALIDA") signo = -1;
-      else if (doc.tipo === "AJUSTE") signo = 1; 
-      else if (doc.tipo === "DEVOLUCION") signo = doc.proveedorid ? -1 : 1;
+      if (doc.tipo === TIPO_DOCUMENTO_INGRESO) signo = 1;
+      else if (doc.tipo === TIPO_DOCUMENTO_SALIDA) signo = -1;
+      else if (doc.tipo === TIPO_DOCUMENTO_AJUSTE) signo = 1;
+      else if (doc.tipo === TIPO_DOCUMENTO_DEVOLUCION) signo = doc.proveedorid ? -1 : 1;
 
       if (signo !== 0) {
         const key = item.productoid;
@@ -182,17 +189,17 @@ export const inventarioService = {
 
     // Historial para visualización (últimos 100)
     const movimientosRaw = await prisma.documento_item.findMany({
-      where: { 
+      where: {
           productoid: productoId,
-          documento: { estado: "APROBADO" } 
+          documento: { estado: ESTADO_DOCUMENTO_APROBADO }
       },
       include: {
-        documento: true, 
+        documento: true,
         unidad: true,
         lote: true,
       },
       orderBy: { createdat: "desc" },
-      take: 100, 
+      take: 100,
     });
 
     const bodegas = await prisma.bodega.findMany();
@@ -201,7 +208,7 @@ export const inventarioService = {
 
     // Cálculo total histórico exacto
     const allItems = await prisma.documento_item.findMany({
-        where: { productoid: productoId, documento: { estado: "APROBADO" } },
+        where: { productoid: productoId, documento: { estado: ESTADO_DOCUMENTO_APROBADO } },
         select: { cantidad: true, documento: { select: { tipo: true, proveedorid: true } } }
     });
 
@@ -209,11 +216,11 @@ export const inventarioService = {
     for (const it of allItems) {
         const q = numeroDesdeDecimal(it.cantidad);
         let s = 0;
-        if (it.documento.tipo === "INGRESO") s = 1;
-        else if (it.documento.tipo === "SALIDA") s = -1;
-        else if (it.documento.tipo === "AJUSTE") s = 1; 
-        else if (it.documento.tipo === "DEVOLUCION") s = it.documento.proveedorid ? -1 : 1;
-        
+        if (it.documento.tipo === TIPO_DOCUMENTO_INGRESO) s = 1;
+        else if (it.documento.tipo === TIPO_DOCUMENTO_SALIDA) s = -1;
+        else if (it.documento.tipo === TIPO_DOCUMENTO_AJUSTE) s = 1;
+        else if (it.documento.tipo === TIPO_DOCUMENTO_DEVOLUCION) s = it.documento.proveedorid ? -1 : 1;
+
         existenciaTotalCalculada += (s * q);
     }
 
@@ -224,13 +231,13 @@ export const inventarioService = {
       const qty = numeroDesdeDecimal(item.cantidad);
       let signo = 0;
       let tipoTexto = doc.tipo as string;
-      
+
       switch (doc.tipo) {
-        case "INGRESO": signo = 1; break;
-        case "SALIDA": signo = -1; break;
-        case "AJUSTE": signo = 1; break;
-        case "DEVOLUCION":
-          if (doc.proveedorid) { signo = -1; tipoTexto = "DEV. PROVEEDOR"; } 
+        case TIPO_DOCUMENTO_INGRESO: signo = 1; break;
+        case TIPO_DOCUMENTO_SALIDA: signo = -1; break;
+        case TIPO_DOCUMENTO_AJUSTE: signo = 1; break;
+        case TIPO_DOCUMENTO_DEVOLUCION:
+          if (doc.proveedorid) { signo = -1; tipoTexto = "DEV. PROVEEDOR"; }
           else { signo = 1; tipoTexto = "DEV. INTERNA"; }
           break;
         default: signo = 0;
@@ -242,11 +249,11 @@ export const inventarioService = {
       let bodegaTexto = "";
       const origenId = (doc as any).bodegaorigenid;
       const destinoId = (doc as any).bodegadestinoid;
-      
+
       if (doc.tipo === "TRANSFERENCIA") {
         bodegaTexto = `${origenId ? bodegasMap.get(origenId) : "?"} → ${destinoId ? bodegasMap.get(destinoId) : "?"}`;
       } else if (signo > 0) {
-         bodegaTexto = destinoId ? bodegasMap.get(destinoId) || "" : ""; 
+         bodegaTexto = destinoId ? bodegasMap.get(destinoId) || "" : "";
       } else {
          bodegaTexto = origenId ? bodegasMap.get(origenId) || "" : "";
       }

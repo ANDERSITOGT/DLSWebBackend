@@ -1,5 +1,9 @@
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
 import PDFDocument from "pdfkit";
+import {
+  ESTADO_DOCUMENTO_APROBADO,
+  TIPO_DOCUMENTO_SALIDA,
+} from "../../core/constants";
 
 // ==========================================
 // Tipos de Datos (DTOs)
@@ -61,7 +65,7 @@ export const lotesService = {
         cultivo: true,
         encargados: { include: { usuario: true } },
         documento_item: {
-          where: { documento: { tipo: "SALIDA", estado: "APROBADO" } },
+          where: { documento: { tipo: TIPO_DOCUMENTO_SALIDA, estado: ESTADO_DOCUMENTO_APROBADO } },
           // 👈 IMPORTANTE: Traemos documentoid para contar únicos
           select: { cantidad: true, costounit: true, documentoid: true } 
         }
@@ -147,7 +151,7 @@ export const lotesService = {
     const salidas = await prisma.documento_item.findMany({
       where: {
         loteid: loteId,
-        documento: { tipo: "SALIDA", estado: "APROBADO" }
+        documento: { tipo: TIPO_DOCUMENTO_SALIDA, estado: ESTADO_DOCUMENTO_APROBADO }
       },
       include: {
         documento: true,

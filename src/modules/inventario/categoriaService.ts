@@ -1,5 +1,5 @@
 // src/services/categoriaService.ts
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
 
 export type CategoriaDTO = {
   id: string;

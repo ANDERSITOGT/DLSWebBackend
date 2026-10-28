@@ -1,6 +1,7 @@
 import { Router, Response } from "express";
-import { authenticateToken, AuthRequest } from "../middlewares/auth";
-import { lotesService } from "../services/historialLotesService";
+import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
+import { lotesService } from "./historialLotesService";
+import catalogoLotesService from "./lotesService";
 
 const router = Router();
 
@@ -14,6 +15,18 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     console.error("Error obteniendo lotes:", error);
     res.status(500).json({ message: "Error al cargar el dashboard de lotes." });
   }
+});
+
+router.get("/catalogo", authenticateToken, async (req: AuthRequest, res: Response) => {
+    try {
+        const usuarioId = req.user?.id;
+        const usuarioRol = req.user?.rol;
+        const lotes = await catalogoLotesService.getLotes(usuarioId, usuarioRol);
+        res.json(lotes);
+    } catch (error) {
+        console.error("❌ Error en /lotes:", error);
+        res.status(500).json({ error: "Error al obtener lotes" });
+    }
 });
 
 // GET /api/lotes/:id -> Detalle Completo

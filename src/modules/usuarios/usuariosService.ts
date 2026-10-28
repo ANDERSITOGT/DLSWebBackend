@@ -1,4 +1,4 @@
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
 
 /**
  * Obtiene lista de usuarios con rol SOLICITANTE.

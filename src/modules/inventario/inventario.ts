@@ -1,6 +1,7 @@
 import { Router } from "express";
 import PDFDocument from "pdfkit";
-import { inventarioService } from "../services/inventarioService";
+import prisma from "../../core/prisma";
+import { inventarioService } from "./inventarioService";
 
 const router = Router();
 
@@ -17,17 +18,17 @@ router.get("/", async (req, res) => {
     // Si limit es 'all', mandamos undefined (sin límite), si no, un número (default 30)
     let limit: number | undefined = 30;
     if (limitQuery === 'all') {
-        limit = undefined; 
+        limit = undefined;
     } else if (limitQuery) {
         limit = parseInt(limitQuery);
     }
 
-    const productos = await inventarioService.getListadoProductos({ 
-        limit, 
-        search, 
-        categoria 
+    const productos = await inventarioService.getListadoProductos({
+        limit,
+        search,
+        categoria
     });
-    
+
     res.json({ productos });
   } catch (error) {
     console.error("Error en GET /api/inventario:", error);
@@ -44,6 +45,18 @@ router.get("/categorias", async (req, res) => {
     res.json({ categorias });
   } catch (error) {
     res.status(500).json({ message: "Error" });
+  }
+});
+
+router.get("/bodegas", async (req, res) => {
+  try {
+    const bodegas = await prisma.bodega.findMany({
+      orderBy: { nombre: "asc" },
+      select: { id: true, nombre: true }
+    });
+    res.json(bodegas);
+  } catch (error) {
+    res.status(500).json({ error: "Error al obtener bodegas" });
   }
 });
 
@@ -66,7 +79,7 @@ router.get("/pdf", async (req, res) => {
 
     doc.fontSize(16).text("REPORTE DE INVENTARIO", { align: "center" });
     doc.moveDown();
-    
+
     // Tabla simple
     ordenados.forEach(p => {
         doc.fontSize(10).text(`${p.codigo} - ${p.nombre}`);

@@ -1,6 +1,6 @@
 // src/routes/inicio.ts
 import { Router } from "express";
-import { inicioService } from "../services/inicioService";
+import { inicioService } from "./inicioService";
 
 const router = Router();
 

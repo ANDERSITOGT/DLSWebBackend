@@ -1,4 +1,4 @@
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
 
 /**
  * Obtiene el listado de lotes.

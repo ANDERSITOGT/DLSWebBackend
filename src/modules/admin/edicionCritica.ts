@@ -1,7 +1,7 @@
 import { Router, Response } from "express";
-import { authenticateToken, AuthRequest } from "../middlewares/auth";
-import { edicionCriticaService } from "../services/edicionCriticaService";
-import prisma from "../prisma";
+import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
+import { edicionCriticaService } from "./edicionCriticaService";
+import prisma from "../../core/prisma";
 import bcrypt from "bcrypt";
 
 const router = Router();

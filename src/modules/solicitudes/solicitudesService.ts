@@ -1,7 +1,24 @@
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
 import PDFDocument from "pdfkit";
+import {
+  ESTADO_DOCUMENTO_APROBADO,
+  SOLICITUD_APROBADA,
+  SOLICITUD_ENTREGADA,
+  SOLICITUD_PENDIENTE,
+  SOLICITUD_RECHAZADA,
+  TIPO_DOCUMENTO_AJUSTE,
+  TIPO_DOCUMENTO_DEVOLUCION,
+  TIPO_DOCUMENTO_INGRESO,
+  TIPO_DOCUMENTO_SALIDA,
+  TIPO_SOLICITUD_DESPACHO,
+  TIPO_SOLICITUD_DEVOLUCION,
+} from "../../core/constants";
 
-export type EstadoSolicitud = "PENDIENTE" | "APROBADA" | "RECHAZADA" | "ENTREGADA";
+export type EstadoSolicitud =
+  | typeof SOLICITUD_PENDIENTE
+  | typeof SOLICITUD_APROBADA
+  | typeof SOLICITUD_RECHAZADA
+  | typeof SOLICITUD_ENTREGADA;
 
 type CrearSolicitudProductoDTO = {
   productoid: string;
@@ -16,7 +33,7 @@ export type CrearSolicitudDTO = {
   solicitanteid?: string; // Opcional porque lo puede inferir del usuario
   bodegaid?: string | null;
   productos: CrearSolicitudProductoDTO[];
-  tipo?: "DESPACHO" | "DEVOLUCION";
+  tipo?: typeof TIPO_SOLICITUD_DESPACHO | typeof TIPO_SOLICITUD_DEVOLUCION;
   solicitudOrigenId?: string; 
 };
 
@@ -26,7 +43,7 @@ export type CrearSolicitudDTO = {
 async function getSolicitudes(opciones: {
   estado?: EstadoSolicitud;
   usuario?: { id: string; rol: string };
-  tipo?: "DESPACHO" | "DEVOLUCION"; 
+  tipo?: typeof TIPO_SOLICITUD_DESPACHO | typeof TIPO_SOLICITUD_DEVOLUCION;
 }) {
   const { estado, usuario, tipo } = opciones;
   const where: any = {};
@@ -49,8 +66,8 @@ async function getSolicitudes(opciones: {
       solicitud_item: true,
       other_solicitud: { 
           where: { 
-            tipo: "DEVOLUCION",
-            estado: { not: "RECHAZADA" }
+            tipo: TIPO_SOLICITUD_DEVOLUCION,
+            estado: { not: SOLICITUD_RECHAZADA }
           },
           select: { id: true } 
       }
@@ -62,7 +79,7 @@ async function getSolicitudes(opciones: {
     codigo: s.id,
     fecha: s.fecha,
     estado: s.estado as EstadoSolicitud,
-    tipo: (s as any).tipo || "DESPACHO",
+    tipo: (s as any).tipo || TIPO_SOLICITUD_DESPACHO,
     bodegaNombre: s.bodega?.nombre ?? "Sin Bodega",
     solicitanteNombre: s.usuario_solicitud_solicitanteidTousuario?.nombre ?? "Desconocido",
     totalProductos: s.solicitud_item.length,
@@ -99,7 +116,7 @@ async function getDetalleSolicitud(id: string) {
     codigo: solicitud.id,
     fecha: solicitud.fecha,
     estado: solicitud.estado as EstadoSolicitud,
-    tipo: (solicitud as any).tipo || "DESPACHO",
+    tipo: (solicitud as any).tipo || TIPO_SOLICITUD_DESPACHO,
     solicitante: {
       id: solicitud.solicitanteid,
       nombre: solicitud.usuario_solicitud_solicitanteidTousuario?.nombre ?? "",
@@ -133,7 +150,7 @@ async function getDetalleSolicitud(id: string) {
 // CREAR SOLICITUD (CON SEGURIDAD Y STOCK)
 // ===================================================
 async function crearSolicitud(input: CrearSolicitudDTO, usuarioActual: { id: string; rol: string }) {
-  const { fecha, solicitanteid, bodegaid, productos, tipo = "DESPACHO", solicitudOrigenId } = input;
+  const { fecha, solicitanteid, bodegaid, productos, tipo = TIPO_SOLICITUD_DESPACHO, solicitudOrigenId } = input;
 
   // 1. Determinar quién es el solicitante real
   // Si soy ADMIN, puedo pedir a nombre de otro. Si soy SOLICITANTE, soy yo mismo.
@@ -145,9 +162,9 @@ async function crearSolicitud(input: CrearSolicitudDTO, usuarioActual: { id: str
   const nuevaSolicitud = await prisma.$transaction(async (tx) => {
     
     // A. Validar Devoluciones Duplicadas
-    if (tipo === "DEVOLUCION" && solicitudOrigenId) {
+    if (tipo === TIPO_SOLICITUD_DEVOLUCION && solicitudOrigenId) {
         const yaExiste = await tx.solicitud.findFirst({
-            where: { solicitud_origen_id: solicitudOrigenId, estado: { not: "RECHAZADA" } }
+            where: { solicitud_origen_id: solicitudOrigenId, estado: { not: SOLICITUD_RECHAZADA } }
         });
         if (yaExiste) throw new Error(`La solicitud ${solicitudOrigenId} ya tiene una devolución activa.`);
     }
@@ -168,13 +185,13 @@ async function crearSolicitud(input: CrearSolicitudDTO, usuarioActual: { id: str
         }
 
         // 📦 STOCK: Solo validar si es DESPACHO
-        if (tipo === "DESPACHO") {
+        if (tipo === TIPO_SOLICITUD_DESPACHO) {
             // Calcular Stock Físico
-            const ingresos = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: "INGRESO", estado: "APROBADO" } } });
-            const salidas = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: "SALIDA", estado: "APROBADO" } } });
-            const ajustes = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: "AJUSTE", estado: "APROBADO" } } });
-            const devIn = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } } });
-            const devOut = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } } });
+            const ingresos = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: TIPO_DOCUMENTO_INGRESO, estado: ESTADO_DOCUMENTO_APROBADO } } });
+            const salidas = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: TIPO_DOCUMENTO_SALIDA, estado: ESTADO_DOCUMENTO_APROBADO } } });
+            const ajustes = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: TIPO_DOCUMENTO_AJUSTE, estado: ESTADO_DOCUMENTO_APROBADO } } });
+            const devIn = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: TIPO_DOCUMENTO_DEVOLUCION, estado: ESTADO_DOCUMENTO_APROBADO, proveedorid: null } } });
+            const devOut = await tx.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: item.productoid, documento: { tipo: TIPO_DOCUMENTO_DEVOLUCION, estado: ESTADO_DOCUMENTO_APROBADO, NOT: { proveedorid: null } } } });
 
             const stockFisico = ((Number(ingresos._sum.cantidad)||0) + (Number(devIn._sum.cantidad)||0) + (Number(ajustes._sum.cantidad)||0)) - ((Number(salidas._sum.cantidad)||0) + (Number(devOut._sum.cantidad)||0));
 
@@ -183,7 +200,7 @@ async function crearSolicitud(input: CrearSolicitudDTO, usuarioActual: { id: str
                 _sum: { cantidad: true },
                 where: {
                     productoid: item.productoid,
-                    solicitud: { estado: { in: ["PENDIENTE", "APROBADA"] }, tipo: "DESPACHO" }
+                    solicitud: { estado: { in: [SOLICITUD_PENDIENTE, SOLICITUD_APROBADA] }, tipo: TIPO_SOLICITUD_DESPACHO }
                 }
             });
 
@@ -215,7 +232,7 @@ async function crearSolicitud(input: CrearSolicitudDTO, usuarioActual: { id: str
       data: {
         id: codigo,
         fecha: fecha ? new Date(fecha) : new Date(),
-        estado: "PENDIENTE",
+        estado: SOLICITUD_PENDIENTE,
         tipo: tipo,
         solicitanteid: finalSolicitanteId,
         bodegaid: bodegaid ?? null,

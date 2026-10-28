@@ -1,6 +1,6 @@
 import { Router, Response } from "express";
-import prisma from "../prisma";
-import { authenticateToken, AuthRequest } from "../middlewares/auth";
+import prisma from "../../core/prisma";
+import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
 
 const router = Router();
 
@@ -32,6 +32,18 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error("Error al obtener proveedores:", error);
     res.status(500).json({ message: "Error interno al cargar proveedores" });
+  }
+});
+
+router.get("/catalogo", async (req, res) => {
+  try {
+    const proveedores = await prisma.proveedor.findMany({
+      orderBy: { nombre: "asc" },
+      select: { id: true, nombre: true, nit: true }
+    });
+    res.json(proveedores);
+  } catch (error) {
+    res.status(500).json({ error: "Error al obtener proveedores" });
   }
 });
 

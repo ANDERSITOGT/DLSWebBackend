@@ -1,6 +1,6 @@
 // src/routes/categorias.ts
 import express from "express";
-import { categoriaService } from "../services/categoriaService";
+import { categoriaService } from "./categoriaService";
 
 const router = express.Router();
 

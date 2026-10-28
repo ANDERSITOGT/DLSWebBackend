@@ -1,8 +1,8 @@
 import { Router, Response } from "express";
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
 import bcrypt from "bcrypt"; 
-import { authenticateToken, AuthRequest } from "../middlewares/auth";
-import usuariosService from "../services/usuariosService"; // 👈 IMPORTANTE: El nuevo servicio
+import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
+import usuariosService from "./usuariosService"; // 👈 IMPORTANTE: El nuevo servicio
 
 const router = Router();
 

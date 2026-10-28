@@ -1,6 +1,6 @@
 import { Router, Response } from "express";
-import prisma from "../prisma";
-import { authenticateToken, AuthRequest } from "../middlewares/auth";
+import prisma from "../../core/prisma";
+import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
 
 const router = Router();
 
@@ -27,7 +27,7 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
     const data = fincas.map(f => {
       const activos = f.lote.filter(l => l.estado === 'ABIERTO');
       const inactivos = f.lote.filter(l => l.estado === 'CERRADO');
-      
+
       const areaActiva = activos.reduce((acc, l) => acc + Number(l.areamanzanas || 0), 0);
       const metrosActivos = activos.reduce((acc, l) => acc + Number(l.areametroslineales || 0), 0);
 
@@ -78,12 +78,12 @@ router.get("/:id/lotes", authenticateToken, async (req: AuthRequest, res: Respon
     const { id } = req.params;
     const lotes = await prisma.lote.findMany({
       where: { fincaid: id },
-      include: { 
+      include: {
         // 👇 IMPORTANTE: Incluimos variedad aquí
-        cultivo: { select: { id: true, nombre: true, variedad: true } } 
+        cultivo: { select: { id: true, nombre: true, variedad: true } }
       },
       orderBy: [
-        { estado: 'asc' }, 
+        { estado: 'asc' },
         { codigo: 'asc' }
       ]
     });
@@ -137,7 +137,7 @@ router.patch("/lotes/:loteId", authenticateToken, async (req: AuthRequest, res: 
     if (!puedeGestionar(req.user)) return res.status(403).json({ message: "No tienes permiso." });
 
     const { loteId } = req.params;
-    const data = req.body; 
+    const data = req.body;
     const updateData: any = {};
 
     // Recálculo automático de áreas
@@ -150,7 +150,7 @@ router.patch("/lotes/:loteId", authenticateToken, async (req: AuthRequest, res: 
 
     if (data.estado !== undefined) updateData.estado = data.estado;
     if (data.descripcion !== undefined) updateData.descripcion = data.descripcion;
-    
+
     if (data.fechasiembra !== undefined) {
         updateData.fechasiembra = data.fechasiembra ? new Date(data.fechasiembra) : null;
     }
@@ -166,6 +166,50 @@ router.patch("/lotes/:loteId", authenticateToken, async (req: AuthRequest, res: 
     res.json(actualizado);
   } catch (error) {
     res.status(500).json({ message: "Error al guardar celda." });
+  }
+});
+
+router.get("/fincas-lotes", authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const usuarioId = req.user?.id;
+    const usuarioRol = req.user?.rol;
+
+    let loteWhere: any = {
+        estado: "ABIERTO"
+    };
+
+    if (usuarioRol === "SOLICITANTE" && usuarioId) {
+       loteWhere.encargados = {
+         some: { usuarioid: usuarioId }
+       };
+    }
+
+    const fincas = await prisma.finca.findMany({
+      orderBy: { nombre: "asc" },
+      include: {
+        lote: {
+          where: loteWhere,
+          select: {
+              id: true,
+              codigo: true,
+              cultivo: { select: { nombre: true } }
+          }
+        }
+      }
+    });
+
+    const fincasVisibles = fincas
+        .map(f => ({
+            ...f,
+            lote: f.lote || []
+        }))
+        .filter(f => f.lote.length > 0);
+
+    res.json(fincasVisibles);
+
+  } catch (error) {
+    console.error("❌ Error en /fincas-lotes:", error);
+    res.status(500).json({ error: "Error al obtener fincas y lotes" });
   }
 });
 

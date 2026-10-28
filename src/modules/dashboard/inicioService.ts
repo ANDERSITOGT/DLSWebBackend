@@ -1,5 +1,13 @@
 // src/services/inicioService.ts
-import prisma from "../prisma";
+import prisma from "../../core/prisma";
+import {
+  SOLICITUD_APROBADA,
+  SOLICITUD_ENTREGADA,
+  SOLICITUD_PENDIENTE,
+  SOLICITUD_RECHAZADA,
+  TIPO_DOCUMENTO_INGRESO,
+  TIPO_DOCUMENTO_SALIDA,
+} from "../../core/constants";
 
 // Helpers
 function inicioDeHoy() {
@@ -27,7 +35,7 @@ export const inicioService = {
 
     // Resumen
     const pendientes = await prisma.solicitud.count({
-      where: { estado: "PENDIENTE" },
+      where: { estado: SOLICITUD_PENDIENTE },
     });
 
     // Por ahora usamos el total de productos como "stock bajo" demo
@@ -35,7 +43,7 @@ export const inicioService = {
 
     // Solicitudes por atender (pendientes)
     const solicitudesRaw = await prisma.solicitud.findMany({
-      where: { estado: "PENDIENTE" },
+      where: { estado: SOLICITUD_PENDIENTE },
       orderBy: { fecha: "desc" },
       take: 5,
       select: {
@@ -59,7 +67,7 @@ export const inicioService = {
       bodega: s.bodega?.nombre ?? "Sin bodega",
       productos: `${s.solicitud_item.length} productos`,
       fecha: s.fecha ? s.fecha.toISOString() : null,
-      estado: s.estado ?? "PENDIENTE",
+      estado: s.estado ?? SOLICITUD_PENDIENTE,
     }));
 
     // Movimientos del día (documentos de hoy)
@@ -105,11 +113,11 @@ export const inicioService = {
 
     // --------- Resumen ---------
     const pendientes = await prisma.solicitud.count({
-      where: { estado: "PENDIENTE" },
+      where: { estado: SOLICITUD_PENDIENTE },
     });
 
     const aprobadas = await prisma.solicitud.count({
-      where: { estado: "APROBADA" },
+      where: { estado: SOLICITUD_APROBADA },
     });
 
     const estaSemana = await prisma.solicitud.count({
@@ -121,7 +129,7 @@ export const inicioService = {
     // --------- En Proceso ---------
     const enProcesoRaw = await prisma.solicitud.findMany({
       where: {
-        estado: { in: ["PENDIENTE", "APROBADA"] },
+        estado: { in: [SOLICITUD_PENDIENTE, SOLICITUD_APROBADA] },
       },
       orderBy: { fecha: "desc" },
       take: 5,
@@ -140,13 +148,13 @@ export const inicioService = {
       bodega: s.bodega?.nombre ?? "Sin bodega",
       productos: `${s.solicitud_item.length} productos`,
       fecha: s.fecha ? s.fecha.toISOString() : null,
-      estado: s.estado ?? "PENDIENTE",
+      estado: s.estado ?? SOLICITUD_PENDIENTE,
     }));
 
     // --------- Historial (ENTREGADAS / RECHAZADAS) ---------
     const historialRaw = await prisma.solicitud.findMany({
       where: {
-        estado: { in: ["ENTREGADA", "RECHAZADA"] },
+        estado: { in: [SOLICITUD_ENTREGADA, SOLICITUD_RECHAZADA] },
       },
       orderBy: { fecha: "desc" },
       take: 5,
@@ -165,7 +173,7 @@ export const inicioService = {
       bodega: s.bodega?.nombre ?? "Sin bodega",
       productos: `${s.solicitud_item.length} productos`,
       fecha: s.fecha ? s.fecha.toISOString() : null,
-      estado: s.estado ?? "ENTREGADA",
+      estado: s.estado ?? SOLICITUD_ENTREGADA,
     }));
 
     return {
@@ -194,7 +202,7 @@ export const inicioService = {
 
     const solicitudesActivas = await prisma.solicitud.count({
       where: {
-        estado: { in: ["PENDIENTE", "APROBADA"] },
+        estado: { in: [SOLICITUD_PENDIENTE, SOLICITUD_APROBADA] },
       },
     });
 
@@ -212,15 +220,15 @@ export const inicioService = {
 
     // --------- Resumen del día ---------
     const ingresos = await prisma.documento.count({
-      where: { fecha: { gte: hoy }, tipo: "INGRESO" },
+      where: { fecha: { gte: hoy }, tipo: TIPO_DOCUMENTO_INGRESO },
     });
 
     const salidas = await prisma.documento.count({
-      where: { fecha: { gte: hoy }, tipo: "SALIDA" },
+      where: { fecha: { gte: hoy }, tipo: TIPO_DOCUMENTO_SALIDA },
     });
 
     const aprobadasHoy = await prisma.solicitud.count({
-      where: { fecha: { gte: hoy }, estado: "APROBADA" },
+      where: { fecha: { gte: hoy }, estado: SOLICITUD_APROBADA },
     });
 
     // --------- Alertas ---------
