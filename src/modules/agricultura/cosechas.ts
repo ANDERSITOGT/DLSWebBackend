@@ -1,4 +1,4 @@
-import { Response, Router } from "express";
+import { NextFunction, Response, Router } from "express";
 import prisma from "../../core/prisma";
 import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
 import {
@@ -8,11 +8,19 @@ import {
 
 const router = Router();
 
+// Cosechas es un módulo aparte de Bodega: solo ADMIN y COSECHA.
+const soloCosechas = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (!["ADMIN", "COSECHA"].includes(req.user?.rol)) {
+    return res.status(403).json({ message: "No tienes permiso para el módulo de cosechas." });
+  }
+  next();
+};
+
 function esNumeroValido(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
+router.post("/", authenticateToken, soloCosechas, async (req: AuthRequest, res: Response) => {
   try {
     const {
       loteId,
@@ -91,7 +99,7 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   }
 });
 
-router.get("/", authenticateToken, async (_req: AuthRequest, res: Response) => {
+router.get("/", authenticateToken, soloCosechas, async (_req: AuthRequest, res: Response) => {
   try {
     const data = await cosechasService.getListadoCosechas();
     return res.json({ ok: true, cosechas: data });
@@ -101,7 +109,7 @@ router.get("/", authenticateToken, async (_req: AuthRequest, res: Response) => {
   }
 });
 
-router.get("/empacadoras", authenticateToken, async (_req, res) => {
+router.get("/empacadoras", authenticateToken, soloCosechas, async (_req, res) => {
     try {
         const empacadoras = await prisma.empacadora.findMany({
             where: { activo: true },

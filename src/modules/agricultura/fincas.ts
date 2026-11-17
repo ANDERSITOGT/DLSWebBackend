@@ -6,7 +6,7 @@ const router = Router();
 
 // 🛡️ HELPER: Validar permisos
 const puedeGestionar = (user: any) => {
-  const rolesPermitidos = ["ADMIN", "BODEGUERO", "VISOR"];
+  const rolesPermitidos = ["ADMIN", "BODEGUERO", "VISOR", "COSECHA"];
   return rolesPermitidos.includes(user?.rol);
 };
 

@@ -16,6 +16,8 @@ import lotesRouter from "./modules/agricultura/historialLotes";
 import fincasRouter from "./modules/agricultura/fincas";
 import edicionCriticaRouter from "./modules/admin/edicionCritica";
 import cosechasRouter from "./modules/agricultura/cosechas";
+import dashboardRouter from "./modules/dashboard/dashboard";
+import { authenticateToken } from "./core/middlewares/auth";
 
 dotenv.config();
 
@@ -29,9 +31,10 @@ app.use(cors());
 app.use(express.json());
 
 // Rutas API
-app.use("/api/inicio", inicioRouter);
+app.use("/api/dashboard", dashboardRouter);
+app.use("/api/inicio", authenticateToken, inicioRouter);
 app.use("/api/auth", authRouter);
-app.use("/api/inventario", inventarioRouter);
+app.use("/api/inventario", authenticateToken, inventarioRouter);
 app.use("/api/categorias", categoriasRouter);
 app.use("/api/solicitudes", solicitudesRouter);
 app.use("/api/movimientos", movimientosRouter);

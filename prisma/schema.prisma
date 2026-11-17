@@ -337,6 +337,7 @@ enum rol {
   BODEGUERO
   SOLICITANTE
   VISOR
+  COSECHA
 }
 
 enum tipo_documento {
