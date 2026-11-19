@@ -1,4 +1,4 @@
-import prisma from "../../core/prisma";
+﻿import prisma from "../../core/prisma";
 import {
   ESTADO_DOCUMENTO_APROBADO,
   TIPO_DOCUMENTO_AJUSTE,
@@ -68,12 +68,24 @@ export type DashboardResponse = {
 export type UsuarioDashboard = { id: string; rol: string | null };
 
 // ===============================
+// Reglas de acceso por rol
+// ===============================
+// Acceso completo (con datos críticos) a cada módulo.
+const BODEGA_ROLES_COMPLETO = ["ADMIN", "BODEGUERO"] as const;
+const COSECHAS_ROLES_COMPLETO = ["ADMIN", "COSECHA"] as const;
+// Acceso simple (sin datos críticos) al módulo de bodega.
+//  - SOLICITANTE: solo información de SUS propias solicitudes/documentos.
+//  - VISOR: información global de solicitudes, pero sin stock, dinero,
+//    top de despachos ni alertas internas.
+const BODEGA_ROLES_SIMPLE = ["SOLICITANTE", "VISOR"] as const;
+
+// ===============================
 // Helpers de fecha (America/Guatemala = UTC-6, sin horario de verano)
 // ===============================
 const OFFSET_GT_MS = 6 * 60 * 60 * 1000;
 const DIA_MS = 24 * 60 * 60 * 1000;
-const DIAS_SEMANA = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
-const STOCK_CRITICO_MAX = 50; // mismo umbral "Crítico" de inventarioService
+const DIAS_SEMANA = ["dom", "lun", "mar", "mie", "jue", "vie", "sab"];
+const STOCK_CRITICO_MAX = 50; // mismo umbral crítico de inventarioService
 const ESTADOS_SOLICITUD = ["PENDIENTE", "APROBADA", "ENTREGADA", "RECHAZADA"] as const;
 
 type Ventana = {
@@ -163,7 +175,12 @@ async function dashboardBodega(
   usuario: UsuarioDashboard,
   v: Ventana
 ): Promise<Omit<DashboardResponse, "modulo" | "generadoEn">> {
-  const soloPropios = usuario.rol === "SOLICITANTE";
+  const rol = usuario.rol ?? "VISOR";
+  // Modo simple: solo KPIs/graficas/resumen no sensibles, sin alertas.
+  const esSimple = (BODEGA_ROLES_SIMPLE as readonly string[]).includes(rol);
+  // Solo el SOLICITANTE ve exclusivamente sus propios documentos/solicitudes.
+  // El VISOR ve solicitudes globales (en modo simple).
+  const soloPropios = rol === "SOLICITANTE";
 
   const filtroDoc: any = soloPropios
     ? { OR: [{ solicitanteid: usuario.id }, { creadorid: usuario.id }] }
@@ -177,6 +194,7 @@ async function dashboardBodega(
     itemsStock,
     itemsSalida,
     pendientesActuales,
+    activasActuales,
     pendientesViejas,
     borradoresViejos,
   ] = await Promise.all([
@@ -224,6 +242,11 @@ async function dashboardBodega(
       select: { cantidad: true, producto: { select: { nombre: true } } },
     }),
     prisma.solicitud.count({ where: { ...filtroSol, estado: "PENDIENTE" } }),
+    // Solicitudes "activas" = PENDIENTE + APROBADA (aun no entregadas ni rechazadas).
+    // Mismo criterio que el stock comprometido en solicitudesService.
+    prisma.solicitud.count({
+      where: { ...filtroSol, estado: { in: ["PENDIENTE", "APROBADA"] } },
+    }),
     prisma.solicitud.count({
       where: {
         ...filtroSol,
@@ -263,6 +286,13 @@ async function dashboardBodega(
     s.fecha ?? s.createdat;
   const pendientesCreadas = agruparPorDia(
     solicitudes.filter((s) => s.estado === "PENDIENTE"),
+    fechaSol,
+    () => 1,
+    v
+  );
+  // Tendencia de activas: creadas por día con estado activo (PENDIENTE/APROBADA).
+  const activasCreadas = agruparPorDia(
+    solicitudes.filter((s) => s.estado === "PENDIENTE" || s.estado === "APROBADA"),
     fechaSol,
     () => 1,
     v
@@ -325,7 +355,8 @@ async function dashboardBodega(
       if (s <= STOCK_CRITICO_MAX) criticos++;
       if (s > 0) valor += s * precio;
     }
-    return { criticos, valor: soloPropios ? 0 : redondear(valor) };
+    // En modo simple nunca se expone el valor del inventario.
+    return { criticos, valor: esSimple ? 0 : redondear(valor) };
   };
 
   const previo = snapshot(v.inicio.getTime());
@@ -350,7 +381,7 @@ async function dashboardBodega(
     },
     {
       id: "stock-critico",
-      label: "Productos en nivel crítico",
+      label: "Productos en nivel critico",
       value: actual.criticos,
       formato: "numero",
       descripcion: `Productos activos con stock de ${STOCK_CRITICO_MAX} o menos`,
@@ -366,6 +397,16 @@ async function dashboardBodega(
       descripcion: "Solicitudes por aprobar (la tendencia muestra las nuevas por día)",
       variacionPct: variacion(pendientesCreadas.total, pendientesCreadas.totalPrevio),
       tendencia: pendientesCreadas.porDia,
+      icono: "solicitudes",
+    },
+    {
+      id: "solicitudes-activas",
+      label: "Solicitudes activas",
+      value: activasActuales,
+      formato: "numero",
+      descripcion: "Solicitudes pendientes o aprobadas aun sin entregar",
+      variacionPct: variacion(activasCreadas.total, activasCreadas.totalPrevio),
+      tendencia: activasCreadas.porDia,
       icono: "solicitudes",
     },
     {
@@ -424,7 +465,7 @@ async function dashboardBodega(
     { id: "salidas-hoy", label: "Salidas de hoy", value: hoy(salidas), total: null, formato: "numero" },
     {
       id: "solicitudes-aprobadas-hoy",
-      label: "Solicitudes aprobadas",
+      label: "Aprobadas hoy",
       value: hoy(aprobadasHoy),
       total: hoy(solicitudesHoy),
       formato: "numero",
@@ -442,7 +483,7 @@ async function dashboardBodega(
     {
       id: "stock-critico",
       nivel: actual.criticos > 0 ? "danger" : "info",
-      titulo: "Stock crítico",
+      titulo: "Stock critico",
       descripcion: `Productos con ${STOCK_CRITICO_MAX} unidades o menos`,
       cantidad: actual.criticos,
       ruta: "/bodega/inventario",
@@ -451,7 +492,7 @@ async function dashboardBodega(
       id: "solicitudes-sin-atender",
       nivel: pendientesViejas > 0 ? "warning" : "info",
       titulo: "Solicitudes sin atender",
-      descripcion: "Solicitudes pendientes desde hace más de 24 horas",
+      descripcion: "Solicitudes pendientes desde hace mas de 24 horas",
       cantidad: pendientesViejas,
       ruta: "/bodega/solicitudes",
     },
@@ -459,7 +500,7 @@ async function dashboardBodega(
       id: "borradores-antiguos",
       nivel: borradoresViejos > 0 ? "warning" : "info",
       titulo: "Documentos en borrador",
-      descripcion: "Borradores con más de 2 días sin aprobar",
+      descripcion: "Borradores con mas de 2 dias sin aprobar",
       cantidad: borradoresViejos,
       ruta: "/bodega/movimientos",
     },
@@ -467,11 +508,32 @@ async function dashboardBodega(
       id: "ajustes-periodo",
       nivel: "info",
       titulo: "Ajustes de inventario",
-      descripcion: `Ajustes aprobados en los últimos ${v.dias} días`,
+      descripcion: `Ajustes aprobados en los ultimos ${v.dias} dias`,
       cantidad: ajustes.total,
       ruta: "/bodega/movimientos",
     },
   ];
+
+  // En modo simple (SOLICITANTE / VISOR) se recorta todo dato critico:
+  // stock, valor de inventario, top de despachos y alertas internas.
+  if (esSimple) {
+    const kpisPermitidos = new Set([
+      "solicitudes-activas",
+      "solicitudes-pendientes",
+    ]);
+    const graficasPermitidas = new Set(["solicitudes-por-estado"]);
+    const resumenPermitido = new Set([
+      "solicitudes-aprobadas-hoy",
+      "solicitudes-pendientes",
+    ]);
+
+    return {
+      kpis: kpis.filter((k) => kpisPermitidos.has(k.id)),
+      graficas: graficas.filter((g) => graficasPermitidas.has(g.id)),
+      resumenDia: resumenDia.filter((r) => resumenPermitido.has(r.id)),
+      alertas: [],
+    };
+  }
 
   return { kpis, graficas, resumenDia, alertas };
 }
@@ -692,7 +754,7 @@ async function dashboardCosechas(
       id: "lotes-sin-cosecha",
       nivel: sinCosecha > 0 ? "warning" : "info",
       titulo: "Lotes sin cosecha reciente",
-      descripcion: `Lotes abiertos sin cosecha registrada en los últimos ${v.dias} días`,
+      descripcion: `Lotes abiertos sin cosecha registrada en los ultimos ${v.dias} dias`,
       cantidad: sinCosecha,
       ruta: "/cosechas/registro",
     },
@@ -700,7 +762,7 @@ async function dashboardCosechas(
       id: "cosechas-sin-boleta",
       nivel: sinBoleta > 0 ? "danger" : "info",
       titulo: "Cosechas sin boleta",
-      descripcion: "Cosechas del periodo sin número de boleta",
+      descripcion: "Cosechas del periodo sin numero de boleta",
       cantidad: sinBoleta,
       ruta: "/cosechas/registro",
     },
@@ -716,7 +778,7 @@ async function dashboardCosechas(
       id: "lotes-sin-actividad",
       nivel: sinActividad > 0 ? "warning" : "info",
       titulo: "Lotes abiertos sin actividad",
-      descripcion: `Lotes abiertos sin cosechas, insumos ni solicitudes en ${v.dias} días`,
+      descripcion: `Lotes abiertos sin cosechas, insumos ni solicitudes en ${v.dias} dias`,
       cantidad: sinActividad,
       ruta: "/cosechas/registro",
     },
@@ -745,10 +807,15 @@ export const dashboardService = {
     dias: number
   ): Promise<DashboardResponse> {
     const rol = usuario.rol ?? "VISOR";
+
+    // Matriz de acceso por módulo:
+    //  - BODEGA   -> ADMIN, BODEGUERO (completo) + SOLICITANTE, VISOR (simple)
+    //  - COSECHAS -> ADMIN, COSECHA (completo). Nadie mas.
     const puedeVer =
       modulo === "BODEGA"
-        ? ["ADMIN", "BODEGUERO", "SOLICITANTE", "VISOR"].includes(rol)
-        : ["ADMIN", "COSECHA"].includes(rol);
+        ? (BODEGA_ROLES_COMPLETO as readonly string[]).includes(rol) ||
+          (BODEGA_ROLES_SIMPLE as readonly string[]).includes(rol)
+        : (COSECHAS_ROLES_COMPLETO as readonly string[]).includes(rol);
 
     if (!puedeVer) {
       throw new DashboardForbiddenError("No tiene permisos para ver este módulo");
