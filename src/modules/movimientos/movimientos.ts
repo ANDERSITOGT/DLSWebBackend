@@ -1,77 +1,181 @@
-import { Router, Response } from "express";
+import { Router, Response, Request, NextFunction } from "express";
+import multer from "multer";
 import prisma from "../../core/prisma";
+import { Prisma } from "@prisma/client";
 import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
-import { movimientosService } from "./movimientosService";
+import { requireRole } from "../../core/middlewares/roles";
+import { movimientosService, MovimientoError } from "./movimientosService";
+import { extraerTexto, interpretarEscaneo } from "./ocrService";
 
 const router = Router();
 
-// ---------------------------------------------------------------------
-// FUNCIÓN AUXILIAR: CALCULAR MODA
-// ---------------------------------------------------------------------
-function calcularModa(precios: number[]): number {
-  if (precios.length === 0) return 0;
-  
-  const frecuencia: Record<string, number> = {};
-  let maxFrecuencia = 0;
-  let moda = precios[0];
+// ==========================================
+// Configuración de subida para OCR
+// ==========================================
+const MIMES_IMAGEN = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MAX_BYTES_OCR = 10 * 1024 * 1024; // 10 MB
 
-  for (const p of precios) {
-    const key = p.toString();
-    frecuencia[key] = (frecuencia[key] || 0) + 1;
-    
-    if (frecuencia[key] > maxFrecuencia) {
-      maxFrecuencia = frecuencia[key];
-      moda = p;
+const uploadOcr = multer({
+  storage: multer.memoryStorage(), // nunca se escribe a disco
+  limits: { fileSize: MAX_BYTES_OCR, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (!MIMES_IMAGEN.has(file.mimetype)) {
+      const err = new Error("Formato no soportado.") as Error & { codigo?: string };
+      err.codigo = "ARCHIVO_INVALIDO";
+      return cb(err);
     }
-  }
-  return moda;
+    cb(null, true);
+  },
+});
+
+/**
+ * Envuelve `uploadOcr.single("archivo")` aceptando además el campo legacy
+ * `documento`. Devuelve 400 ARCHIVO_REQUERIDO si no llega ningún archivo.
+ */
+function subirFactura(req: Request, res: Response, next: NextFunction) {
+  const handler = uploadOcr.fields([
+    { name: "archivo", maxCount: 1 },
+    { name: "documento", maxCount: 1 },
+  ]);
+
+  handler(req, res, (err: any) => {
+    if (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({
+            message: "El archivo supera el límite de 10 MB.",
+            codigo: "ARCHIVO_INVALIDO",
+          });
+        }
+        return res.status(400).json({
+          message: `Error al recibir el archivo: ${err.message}`,
+          codigo: "ARCHIVO_INVALIDO",
+        });
+      }
+      if (err?.codigo === "ARCHIVO_INVALIDO") {
+        return res.status(400).json({
+          message: "Formato no soportado. Use JPEG, PNG o WEBP.",
+          codigo: "ARCHIVO_INVALIDO",
+        });
+      }
+      return res.status(400).json({
+        message: "No se pudo procesar el archivo enviado.",
+        codigo: "ARCHIVO_INVALIDO",
+      });
+    }
+
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    const archivo = files?.archivo?.[0] ?? files?.documento?.[0];
+
+    if (!archivo) {
+      return res.status(400).json({
+        message: "El archivo de factura es obligatorio.",
+        codigo: "ARCHIVO_REQUERIDO",
+      });
+    }
+
+    // Segundo filtro de seguridad sobre el MIME real recibido
+    if (!MIMES_IMAGEN.has(archivo.mimetype)) {
+      return res.status(400).json({
+        message: "Formato no soportado. Use JPEG, PNG o WEBP.",
+        codigo: "ARCHIVO_INVALIDO",
+      });
+    }
+
+    (req as AuthRequest & { archivoFactura?: Express.Multer.File }).archivoFactura = archivo;
+    next();
+  });
 }
 
 // ==========================================
-// POST /api/movimientos/ingreso
+// POST /api/movimientos/escanear  (OCR de factura)
+// Contrato: API_BACKEND.md §4.1
 // ==========================================
-router.post("/ingreso", authenticateToken, async (req: AuthRequest, res: Response) => {
+router.post(
+  "/escanear",
+  authenticateToken,
+  requireRole("ADMIN", "BODEGUERO"),
+  subirFactura,
+  async (req: AuthRequest & { archivoFactura?: Express.Multer.File }, res: Response) => {
+    try {
+      const archivo = req.archivoFactura;
+      if (!archivo) {
+        return res.status(400).json({
+          message: "El archivo de factura es obligatorio.",
+          codigo: "ARCHIVO_REQUERIDO",
+        });
+      }
+
+      const proveedorIdRaw = (req.body?.proveedorId ?? "").toString().trim();
+      const proveedorId = proveedorIdRaw.length > 0 ? proveedorIdRaw : null;
+
+      const { textoCrudo, confianza } = await extraerTexto(archivo.buffer);
+
+      const resultado = await interpretarEscaneo(prisma, {
+        textoCrudo,
+        confianza,
+        proveedorId,
+      });
+
+      if (resultado.tipo === "sin_texto") {
+        return res.status(422).json({
+          message: "No se pudo leer el documento.",
+          codigo: "OCR_SIN_TEXTO",
+          escaneo: { textoCrudo: resultado.textoCrudo, confianza: resultado.confianza },
+        });
+      }
+
+      return res.status(200).json({ ok: true, escaneo: resultado.escaneo });
+    } catch (error: any) {
+      console.error("Error en POST /api/movimientos/escanear:", error);
+      return res.status(500).json({ message: "Error interno al procesar el escaneo." });
+    }
+  }
+);
+
+// ==========================================
+// POST /api/movimientos/ingreso
+// Solo ADMIN y BODEGUERO (mismo criterio que /ajuste y /devolucion-proveedor)
+// ==========================================
+router.post("/ingreso", authenticateToken, requireRole("ADMIN", "BODEGUERO"), async (req: AuthRequest, res: Response) => {
   try {
-    const { bodegaId, proveedorId, fecha, tipoComprobante, factura, serie, uuid, observaciones, items } = req.body;
-    if (!bodegaId || !items || items.length === 0) return res.status(400).json({ message: "Faltan datos obligatorios." });
     const userId = req.user?.id;
     if (!userId) return res.status(403).json({ message: "Error de identidad." });
 
-    const resultado = await prisma.$transaction(async (tx) => {
-      const anioActual = new Date().getFullYear();
-      let nuevoCorrelativo = 1;
-      const contador = await tx.consecutivo.findUnique({ where: { tipo_anio: { tipo: "INGRESO", anio: anioActual } } });
-      if (contador) {
-          const actualizado = await tx.consecutivo.update({ where: { id: contador.id }, data: { ultimo: { increment: 1 } } });
-          nuevoCorrelativo = actualizado.ultimo || 1;
-      } else {
-          await tx.consecutivo.create({ data: { tipo: "INGRESO", anio: anioActual, ultimo: 1, prefijo: "ING" } });
-          nuevoCorrelativo = 1;
-      }
-      const codigoGenerado = `ING-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
-      const documento = await tx.documento.create({
-        data: { tipo: "INGRESO", estado: "APROBADO", consecutivo: codigoGenerado, fecha: fecha ? new Date(fecha) : new Date(), bodegadestinoid: bodegaId, proveedorid: proveedorId || null, creadorid: userId, observacion: observaciones || "" },
-      });
-      if (proveedorId && factura) {
-        const proveedorData = await tx.proveedor.findUnique({ where: { id: proveedorId } });
-        await tx.comprobante_fiscal.create({ data: { documentoid: documento.id, tipocomprobante: tipoComprobante || "FACTURA", nitemisor: proveedorData?.nit || "CF", numero: factura, serie: serie || null, uuid: uuid || null, fechaemision: fecha ? new Date(fecha) : new Date() } });
-      }
-      for (const item of items) {
-        const productoInfo = await tx.producto.findUnique({ where: { id: item.productoId } });
-        if (!productoInfo) throw new Error(`Producto ${item.productoId} no encontrado`);
-        await tx.documento_item.create({ data: { documentoid: documento.id, productoid: item.productoId, cantidad: item.cantidad, costounit: item.costo, unidadid: productoInfo.unidadid, loteid: item.loteId || null }, });
-        const ultimosIngresos = await tx.documento_item.findMany({ where: { productoid: item.productoId, documento: { tipo: "INGRESO", estado: "APROBADO" } }, orderBy: { createdat: "desc" }, take: 10, select: { costounit: true } });
-        const precios = ultimosIngresos.map(u => Number(u.costounit));
-        if (precios.length === 0) precios.push(Number(item.costo));
-        const nuevoPrecioRef = calcularModa(precios);
-        await tx.producto.update({ where: { id: item.productoId }, data: { precioref: nuevoPrecioRef } });
-      }
-      return documento;
-    }, { maxWait: 5000, timeout: 20000 });
-    res.json({ ok: true, documento: resultado, message: "Ingreso registrado correctamente" });
+    const documento = await movimientosService.registrarIngreso(req.body, userId);
+
+    return res.status(201).json({
+      ok: true,
+      documento,
+      message: "Ingreso registrado correctamente",
+    });
   } catch (error: any) {
+    // Errores de negocio controlados (400 / 403 / 404 / 409)
+    if (error instanceof MovimientoError) {
+      return res.status(error.statusCode).json({
+        message: error.message,
+        ...(error.codigo ? { codigo: error.codigo } : {}),
+      });
+    }
+
+    // Violación de unicidad/lógica detectada por Prisma
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (error.code === "P2002") {
+        return res.status(409).json({
+          message: "Esta factura ya fue registrada para este proveedor",
+          codigo: "FACTURA_DUPLICADA",
+        });
+      }
+      if (error.code === "P2003") {
+        return res.status(400).json({
+          message: "Referencia inválida: la bodega, el producto, el lote o el proveedor no existen.",
+          codigo: "REFERENCIA_INVALIDA",
+        });
+      }
+    }
+
     console.error("Error al crear ingreso:", error);
-    res.status(500).json({ message: "Error interno", error: error.message || error });
+    return res.status(500).json({ message: "Error interno al registrar el ingreso." });
   }
 });
 
