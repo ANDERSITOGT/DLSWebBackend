@@ -13,7 +13,7 @@ const validarPermisos = (user: any) => {
 };
 
 // ====================================================================
-// 1. OBTENER LISTA
+// 1. OBTENER LISTA (paginada + búsqueda)
 // ====================================================================
 router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -22,13 +22,42 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: "No tienes permiso para ver proveedores." });
     }
 
-    const proveedores = await prisma.proveedor.findMany({
-      orderBy: { nombre: 'asc' },
-      include: {
-        proveedor_contacto: true 
-      }
+        // 2. Paginación (page default 1, limit default 10, máx 100) y búsqueda
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), 100);
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+
+    const where = q
+      ? {
+          OR: [
+            { nombre: { contains: q, mode: "insensitive" as const } },
+            { nit: { contains: q, mode: "insensitive" as const } },
+          ],
+        }
+      : {};
+
+    const [proveedores, total] = await Promise.all([
+      prisma.proveedor.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { nombre: "asc" },
+        include: {
+          proveedor_contacto: true,
+        },
+      }),
+      prisma.proveedor.count({ where }),
+    ]);
+
+    res.json({
+      data: proveedores,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
     });
-    res.json(proveedores);
   } catch (error) {
     console.error("Error al obtener proveedores:", error);
     res.status(500).json({ message: "Error interno al cargar proveedores" });
@@ -82,7 +111,7 @@ router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 });
 
 // ====================================================================
-// 3. EDICIÓN EN LÍNEA (NIT y Notas)
+// 3. EDICIÓN EN LÍNEA (Nombre, NIT y Notas)
 // ====================================================================
 router.patch("/:id", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -92,9 +121,30 @@ router.patch("/:id", authenticateToken, async (req: AuthRequest, res: Response) 
     }
 
     const { id } = req.params;
-    let { nit, notas } = req.body;
+    let { nombre, nit, notas } = req.body;
 
     const updateData: any = {};
+
+    // 2. Validación del nombre (opcional, pero si viene no puede quedar vacío ni duplicado)
+    if (nombre !== undefined) {
+      nombre = nombre?.trim();
+      if (!nombre) {
+        return res.status(400).json({ message: "El nombre no puede estar vacío" });
+      }
+
+      const duplicado = await prisma.proveedor.findFirst({
+        where: {
+          nombre: { equals: nombre, mode: "insensitive" },
+          id: { not: id },
+        },
+      });
+      if (duplicado) {
+        return res.status(409).json({ message: "Ya existe un proveedor con ese nombre" });
+      }
+
+      updateData.nombre = nombre;
+    }
+
     if (nit !== undefined) updateData.nit = nit?.trim();
     if (notas !== undefined) updateData.notas = notas?.trim();
 
@@ -108,7 +158,11 @@ router.patch("/:id", authenticateToken, async (req: AuthRequest, res: Response) 
     });
 
     res.json(actualizado);
-  } catch (error) {
+  } catch (error: any) {
+    // Red de seguridad: restricción única de la BD (nombre duplicado)
+    if (error?.code === "P2002") {
+      return res.status(409).json({ message: "Ya existe un proveedor con ese nombre" });
+    }
     console.error("Error editando proveedor:", error);
     res.status(500).json({ message: "Error al actualizar la celda" });
   }

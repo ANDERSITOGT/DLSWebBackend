@@ -135,14 +135,30 @@ Acceso por rol (`modulo`):
 
 Lectura de lista y escritura limitadas a `ADMIN` y `BODEGUERO`.
 
-| Método | Ruta | Auth / Rol | Body | Descripción | Respuesta |
+| Método | Ruta | Auth / Rol | Body / Query | Descripción | Respuesta |
 |---|---|---|---|---|---|
-| GET | `/` | 🔒 ADMIN/BODEGUERO | – | Lista proveedores con contactos. | **array plano** `[{ ...proveedor, proveedor_contacto: [] }]` |
+| GET | `/` | 🔒 ADMIN/BODEGUERO | `page` (default `1`), `limit` (default `10`, **máx 100**), `q` (búsqueda opcional) | Lista proveedores **paginada** con contactos. `q` busca (case-insensitive) por `nombre` **o** `nit`. | **envuelto** `{ data: [{ ...proveedor, proveedor_contacto: [] }], meta: { total, page, limit, totalPages } }` |
 | GET | `/catalogo` | – (público) | – | Catálogo liviano (selects). | **array plano** `[{ id, nombre, nit }]` |
 | POST | `/` | 🔒 ADMIN/BODEGUERO | `{ nombre, nit, notas }` | Crea proveedor. | proveedor (201) |
-| PATCH | `/:id` | 🔒 ADMIN/BODEGUERO | `{ nit, notas }` | Edita proveedor. | proveedor |
+| PATCH | `/:id` | 🔒 ADMIN/BODEGUERO | `{ nombre?, nit?, notas? }` | Edita proveedor. | proveedor |
 | POST | `/:id/contactos` | 🔒 ADMIN/BODEGUERO | `{ nombre, telefono, email, puesto, notas }` | Agrega contacto. | contacto (201) |
 | DELETE | `/contactos/:contactoId` | 🔒 ADMIN/BODEGUERO | – | Elimina contacto. | `{ success: true }` |
+
+`GET /` — respuesta paginada:
+```ts
+{
+  data: {
+    id, nombre, nit, notas, createdat,
+    proveedor_contacto: { id, proveedorid, nombre, telefono, email, puesto, notas, createdat }[]
+  }[],
+  meta: { total: number, page: number, limit: number, totalPages: number }
+}
+```
+
+`PATCH /:id` — reglas de `nombre` (opcional):
+- Si viene y queda vacío (tras `trim`) → **400** `{ message: "El nombre no puede estar vacío" }`.
+- Si choca con otro proveedor (case-insensitive) → **409** `{ message: "Ya existe un proveedor con ese nombre" }`.
+- `nit` y `notas` siguen siendo opcionales e independientes.
 
 ---
 
