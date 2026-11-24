@@ -4,7 +4,15 @@ import prisma from "../../core/prisma";
 import { Prisma } from "@prisma/client";
 import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
 import { requireRole } from "../../core/middlewares/roles";
-import { movimientosService, MovimientoError } from "./movimientosService";
+import {
+  movimientosService,
+  MovimientoError,
+  normalizarRangoFechas,
+  LIMITE_PAGINA_DEFAULT,
+  type MovimientosFiltros,
+  type MovimientoTipo,
+  type MovimientoEstado,
+} from "./movimientosService";
 import { extraerTexto, interpretarEscaneo } from "./ocrService";
 
 const router = Router();
@@ -261,27 +269,89 @@ router.post("/devolucion-proveedor", authenticateToken, async (req: AuthRequest,
 // RUTAS DE LECTURA
 // ================================
 
-// 1. MOVIMIENTOS GENERALES
-router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
+/**
+ * Extrae y valida los filtros del listado desde el query string.
+ * Los errores de `normalizarRangoFechas` (fechas inválidas o rango
+ * excedido) se propagan como `MovimientoError` (400).
+ */
+function filtrosDesdeQuery(req: Request): MovimientosFiltros {
+  const q = req.query;
+  const { fechaInicio, fechaFin } = normalizarRangoFechas(q.fechaInicio, q.fechaFin);
+
+  const tipo = texto(req.query.tipo);
+  const estado = texto(req.query.estado);
+
+  return {
+    tipo: tipo ? (tipo.toUpperCase() as MovimientoTipo) : undefined,
+    estado: estado ? (estado.toUpperCase() as MovimientoEstado) : undefined,
+    proveedorId: texto(q.proveedorId),
+    solicitanteId: texto(q.solicitanteId),
+    bodegaId: texto(q.bodegaId),
+    q: texto(q.q),
+    fechaInicio,
+    fechaFin,
+  };
+}
+
+function texto(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const limpio = String(value).trim();
+  return limpio.length > 0 ? limpio : undefined;
+}
+
+/** Traduce un `MovimientoError` a respuesta HTTP; devuelve `false` si no lo es. */
+function responderError(res: Response, error: any, contexto: string): boolean {
+  if (error instanceof MovimientoError) {
+    res.status(error.statusCode).json({
+      message: error.message,
+      ...(error.codigo ? { codigo: error.codigo } : {}),
+    });
+    return true;
+  }
+  console.error(`Error en ${contexto}:`, error);
+  return false;
+}
+
+// 1. EXPORTAR MOVIMIENTOS  (debe ir ANTES de "/:id")
+router.get("/export", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const usuario = req.user ? { id: req.user.id, rol: req.user.rol } : undefined;
-    const data = await movimientosService.getListadoMovimientos(usuario);
-    res.json({ movimientos: data });
-  } catch (error) {
-    console.error("Error en GET /api/movimientos:", error);
-    res.status(500).json({ message: "Error al obtener movimientos" });
-  }
-});
+    const filtros = filtrosDesdeQuery(req);
 
-// 2. EXPORTAR MOVIMIENTOS
-router.get("/export", async (req, res) => {
-  try {
-    const { filename, mime, content } = await movimientosService.exportListadoMovimientosPDF();
+    const { filename, mime, content } =
+      await movimientosService.exportListadoMovimientosPDF(filtros, usuario);
+
     res.setHeader("Content-Type", mime);
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(content);
-  } catch (error) {
+  } catch (error: any) {
+    if (responderError(res, error, "GET /api/movimientos/export")) return;
     res.status(500).send("Error al exportar");
+  }
+});
+
+// 2. MOVIMIENTOS GENERALES
+router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const usuario = req.user ? { id: req.user.id, rol: req.user.rol } : undefined;
+    const filtros = filtrosDesdeQuery(req);
+
+    const page = Number(req.query.page);
+    const limit = Number(req.query.limit);
+
+    const data = await movimientosService.getListadoMovimientos(
+      filtros,
+      {
+        page: Number.isFinite(page) ? page : 1,
+        limit: Number.isFinite(limit) ? limit : LIMITE_PAGINA_DEFAULT,
+      },
+      usuario
+    );
+
+    res.json(data);
+  } catch (error: any) {
+    if (responderError(res, error, "GET /api/movimientos")) return;
+    res.status(500).json({ message: "Error al obtener movimientos" });
   }
 });
 
@@ -289,22 +359,28 @@ router.get("/export", async (req, res) => {
 router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id;
-    const data = await movimientosService.getDetalleMovimiento(id);
+    const usuario = req.user ? { id: req.user.id, rol: req.user.rol } : undefined;
+    const data = await movimientosService.getDetalleMovimiento(id, usuario);
     res.json(data);
-  } catch (error) {
+  } catch (error: any) {
+    if (responderError(res, error, "GET /api/movimientos/:id")) return;
     res.status(500).json({ message: "Error al obtener detalle" });
   }
 });
 
 // 4. EXPORTAR DETALLE MOVIMIENTO
-router.get("/:id/export", async (req, res) => {
+router.get("/:id/export", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id;
-    const { filename, mime, content } = await movimientosService.exportMovimientoDetallePDF(id);
+    const usuario = req.user ? { id: req.user.id, rol: req.user.rol } : undefined;
+    const { filename, mime, content } =
+      await movimientosService.exportMovimientoDetallePDF(id, usuario);
+
     res.setHeader("Content-Type", mime);
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(content);
-  } catch (error) {
+  } catch (error: any) {
+    if (responderError(res, error, "GET /api/movimientos/:id/export")) return;
     res.status(500).send("Error al exportar detalle");
   }
 });

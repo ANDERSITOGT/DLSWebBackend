@@ -193,10 +193,35 @@ Notas del POST:
 | POST | `/ingreso` | 🔒 **ADMIN / BODEGUERO** | ver §4.2 | Ingreso de mercadería (recalcula `precioref` por moda). | `201 { ok, documento, message }` |
 | POST | `/ajuste` | 🔒 ADMIN/BODEGUERO | `{ productoId, cantidad, notas, tipo }` | Ajuste de inventario. | `{ ok, documento }` |
 | POST | `/devolucion-proveedor` | 🔒 ADMIN/BODEGUERO | `{ proveedorId, bodegaId, items: [{ productoId, cantidad, notas? }], notas }` | Devolución a proveedor. | `{ ok, documento }` |
-| GET | `/` | 🔒 | – | Lista de movimientos/documentos. | **envuelto** `{ movimientos: [...] }` |
-| GET | `/export` | – (público) | – | Exporta listado. | PDF |
-| GET | `/:id` | 🔒 | – | Detalle del movimiento. | objeto detalle |
-| GET | `/:id/export` | – (público) | – | Exporta detalle. | PDF |
+| GET | `/` | 🔒 | `page`, `limit`, `tipo`, `estado`, `proveedorId`, `solicitanteId`, `bodegaId`, `q`, `fechaInicio`, `fechaFin` | Lista **paginada** de movimientos/documentos. | **envuelto** `{ data: [...], meta: { total, page, limit, totalPages } }` |
+| GET | `/export` | 🔒 | los mismos filtros que `/` | Exporta el listado (máx. 500 filas). | PDF |
+| GET | `/:id` | 🔒 | – | Detalle del movimiento (acepta `id` UUID o `consecutivo`). | objeto detalle |
+| GET | `/:id/export` | 🔒 | – | Exporta detalle. | PDF |
+
+**Filtros de `GET /`**
+
+| Query | Tipo | Notas |
+|---|---|---|
+| `page` | int | Default `1`. |
+| `limit` | int | Default `15`, **máx. 100**. |
+| `tipo` | enum | `INGRESO \| SALIDA \| TRANSFERENCIA \| AJUSTE \| DEVOLUCION`. |
+| `estado` | enum | `BORRADOR \| APROBADO \| ANULADO`. |
+| `proveedorId` | uuid | |
+| `solicitanteId` | uuid | Un `SOLICITANTE` **solo ve sus documentos**: el backend pisa este filtro con su propio `id`. |
+| `bodegaId` | uuid | Coincide por bodega **origen o destino**. |
+| `q` | string | Busca en `consecutivo`, número/serie del comprobante, o nombre/código de producto. |
+| `fechaInicio` / `fechaFin` | `YYYY-MM-DD` o ISO | Se interpretan en **America/Guatemala**. Un `YYYY-MM-DD` en ambos extremos cubre el día completo. Rango máximo: **366 días**. |
+
+Errores de validación de fechas → **400** `{ message, codigo }` con `codigo`:
+`FECHA_INICIO_INVALIDA`, `FECHA_FIN_INVALIDA`, `RANGO_FECHAS_INVALIDO`, `RANGO_FECHAS_EXCEDIDO`.
+
+**Visibilidad de importes**
+
+`montoTotal` (listado y detalle) y `costounit` / `subtotal` (detalle) llegan como `null`
+para los roles **`SOLICITANTE`, `VISOR` y `COSECHA`**. Solo `ADMIN` y `BODEGUERO` ven importes.
+Aplica igual en los PDF de export.
+
+> 🔒 **`/export` y `/:id/export` ahora exigen token** (antes eran públicas).
 
 > ⚠️ **`POST /ingreso` pasó a exigir rol `ADMIN` o `BODEGUERO`.** Antes cualquier usuario autenticado
 > podía dar de alta mercadería. `SOLICITANTE`, `VISOR` y `COSECHA` ahora reciben **403**.
@@ -493,7 +518,8 @@ Si llegan `proveedorId` **y** `factura` (no vacía):
 - `GET /api/productos/categorias`, `/unidades`, `/productos-busqueda`, `/productos/buscar`
 - `GET /api/proveedores/catalogo`
 - `GET /api/solicitudes/:id/export`
-- `GET /api/movimientos/export`, `/api/movimientos/:id/export`
+
+> 📌 `GET /api/movimientos/export` y `/api/movimientos/:id/export` **ya no son públicas**: ahora exigen token (🔒).
 
 Todo lo demás requiere `Authorization: Bearer <token>`.
 
