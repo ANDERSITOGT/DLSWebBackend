@@ -190,7 +190,7 @@ Notas del POST:
 | Método | Ruta | Auth / Rol | Body | Descripción | Respuesta |
 |---|---|---|---|---|---|
 | POST | `/escanear` | 🔒 ADMIN/BODEGUERO | `multipart/form-data` (ver §4.1) | OCR de factura (tesseract.js `spa+eng`). | `200 { ok, escaneo }` |
-| POST | `/ingreso` | 🔒 **ADMIN / BODEGUERO** | ver §4.2 | Ingreso de mercadería (recalcula `precioref` por moda). | `201 { ok, documento, message }` |
+| POST | `/ingreso` | 🔒 **ADMIN / BODEGUERO** | ver §4.2 | Ingreso de mercadería (actualiza `precioref` con el último costo válido). | `201 { ok, documento, message }` |
 | POST | `/ajuste` | 🔒 ADMIN/BODEGUERO | `{ productoId, cantidad, notas, tipo }` | Ajuste de inventario. | `{ ok, documento }` |
 | POST | `/devolucion-proveedor` | 🔒 ADMIN/BODEGUERO | `{ proveedorId, bodegaId, items: [{ productoId, cantidad, notas? }], notas }` | Devolución a proveedor. | `{ ok, documento }` |
 | GET | `/` | 🔒 | `page`, `limit`, `tipo`, `estado`, `proveedorId`, `solicitanteId`, `bodegaId`, `q`, `fechaInicio`, `fechaFin` | Lista **paginada** de movimientos/documentos. | **envuelto** `{ data: [...], meta: { total, page, limit, totalPages } }` |
@@ -220,6 +220,37 @@ Errores de validación de fechas → **400** `{ message, codigo }` con `codigo`:
 `montoTotal` (listado y detalle) y `costounit` / `subtotal` (detalle) llegan como `null`
 para los roles **`SOLICITANTE`, `VISOR` y `COSECHA`**. Solo `ADMIN` y `BODEGUERO` ven importes.
 Aplica igual en los PDF de export.
+
+**Formato de `productos[]` en el detalle (`GET /:id`)**
+
+Cada ítem se serializa con tipos **primitivos** de JSON, nunca con objetos `Decimal` de Prisma:
+
+```ts
+productos: [{
+  id: string,
+  productoNombre: string,
+  productoCodigo: string,
+  cantidad: string,          // texto para pintar, p.ej. "12.5 L"
+  cantidadNumero: number,    // SIEMPRE number puro (conversión explícita del Decimal)
+  unidad: string,            // abreviatura, p.ej. "L"
+  unidadId: string,
+  loteCodigo: string | null,
+  loteId: string | null,
+  fincaNombre: string | null,
+  notas: string | null,
+  costounit: number | null,  // null si el rol no ve costos o la línea no tiene costo
+  subtotal: number | null    // cantidadNumero * costounit, 2 decimales
+}]
+```
+
+**Snapshot histórico de `precioref` en salidas / ajustes**
+
+Las operaciones que **no** manejan costo unitario propio (SALIDA y DEVOLUCIÓN generadas desde
+`POST /api/solicitudes/:id/entregar`, `POST /api/movimientos/ajuste` y
+`POST /api/movimientos/devolucion-proveedor`) guardan como **snapshot** el `producto.precioref`
+vigente en `documento_item.precioref` (redondeado a 2 decimales). Si el `precioref` del producto es
+`null` o `0`, la columna queda en `null` (no se escribe un 0 engañoso). `documento_item.costounit`
+permanece en `null` en estas líneas.
 
 > 🔒 **`/export` y `/:id/export` ahora exigen token** (antes eran públicas).
 
@@ -436,7 +467,7 @@ Si llegan `proveedorId` **y** `factura` (no vacía):
       costoUnitario: number,
       unidad: string,                // id de la unidad (compatibilidad: antes también era el id)
       loteId: string | null,
-      preciorefActualizado: number   // precio de referencia recalculado por moda (últimos 10 ingresos)
+      preciorefActualizado: number   // producto.precioref tras este ingreso (último costo válido, 2 decimales)
     }]
   }
 }
@@ -444,10 +475,15 @@ Si llegan `proveedorId` **y** `factura` (no vacía):
 
 **Comportamiento de `precioref`**
 
-- Se recalcula por producto una sola vez por ingreso, con la **moda** de los últimos 10 costos de
-  ingresos aprobados **más** el costo nuevo.
-- Si **todas** las líneas de un producto llegaron sin costo, `precioref` **no** se sobrescribe
-  (se conserva el vigente).
+- Se actualiza **una sola vez por producto y por ingreso**, con el **último costo unitario válido**
+  (`costounit > 0`) ingresado en **esa** transacción. Si el mismo producto aparece en varias líneas,
+  gana la última línea con costo mayor a 0.
+- El valor se **redondea a 2 decimales** (`producto.precioref` es `Decimal(12, 2)`). Si el costo
+  excede la precisión de la columna, `precioref` **no** se actualiza y se conserva el vigente.
+- Si **todas** las líneas de un producto llegan con `costounit === 0` (o sin costo), `precioref`
+  **no** se sobrescribe con 0: se conserva el precio de referencia vigente. En ese caso
+  `items[].preciorefActualizado` devuelve el `precioref` que quedó vigente en el producto.
+- Ya **no** se calcula la **moda** de los últimos 10 ingresos aprobados (regla anterior, retirada).
 
 **Otros errores**
 

@@ -259,43 +259,50 @@ function errorValidacion(message: string, codigo: string): MovimientoError {
   return new MovimientoError(message, 400, codigo);
 }
 
+/** Decimales soportados por `producto.precioref` (columna `Decimal(12, 2)`). */
+const PRECIOREF_DECIMALES = 2;
+/** Dígitos enteros máximos soportados por `producto.precioref`. */
+const PRECIOREF_MAX_ENTERO = 10 ** (12 - PRECIOREF_DECIMALES);
+
 /**
- * Indica si TODAS las líneas de un producto llegaron sin costo.
- * En ese caso no se sobrescribe `precioref` con 0, se conserva el vigente.
+ * Normaliza un importe al formato de `producto.precioref` (`Decimal(12, 2)`).
+ *
+ * Redondea a 2 decimales. Devuelve `null` cuando el valor no es válido o no
+ * cabe en la precisión de la columna, para no romper el `UPDATE`.
  */
-function costoTodosOmitidos(
-  lineas: { productoId: string; costoOmitido: boolean }[],
-  productoId: string
-): boolean {
-  const delProducto = lineas.filter((l) => l.productoId === productoId);
-  return delProducto.length > 0 && delProducto.every((l) => l.costoOmitido);
+function normalizarPrecioref(valor: number): number | null {
+  if (!Number.isFinite(valor) || valor < 0) return null;
+  const redondeado = redondear2(valor);
+  if (redondeado >= PRECIOREF_MAX_ENTERO) return null;
+  return redondeado;
 }
 
 // ---------------------------------------------------------------------
-// CALCULAR MODA (precio de referencia)
+// ÚLTIMO COSTO VÁLIDO (precio de referencia)
 // ---------------------------------------------------------------------
 /**
- * Devuelve el precio que más se repite. En caso de empate gana el primero
- * recibido (el caller lo invoca con los precios ordenados del más reciente
- * al más antiguo, por lo que el empate se resuelve hacia lo reciente).
+ * Devuelve el **último costo unitario válido** de un producto dentro de las
+ * líneas del ingreso, es decir, el `costounit` de la última línea (en el
+ * orden en que llegaron) que sea `> 0`.
+ *
+ * Devuelve `null` si ninguna línea del producto trae un costo mayor a 0, en
+ * cuyo caso `producto.precioref` **no debe** sobrescribirse con 0: se conserva
+ * el precio de referencia vigente.
  */
-function calcularModa(precios: number[]): number {
-  if (precios.length === 0) return 0;
+function ultimoCostoValido(
+  lineas: { productoId: string; costo: number; costoOmitido: boolean }[],
+  productoId: string
+): number | null {
+  let ultimo: number | null = null;
 
-  const frecuencia = new Map<number, number>();
-  let maxFrecuencia = 0;
-  let moda = precios[0];
-
-  for (const p of precios) {
-    const actual = (frecuencia.get(p) ?? 0) + 1;
-    frecuencia.set(p, actual);
-
-    if (actual > maxFrecuencia) {
-      maxFrecuencia = actual;
-      moda = p;
-    }
+  for (const linea of lineas) {
+    if (linea.productoId !== productoId) continue;
+    if (linea.costoOmitido) continue;
+    if (!Number.isFinite(linea.costo) || linea.costo <= 0) continue;
+    ultimo = linea.costo;
   }
-    return moda;
+
+  return ultimo;
 }
 
 // ---------------------------------------------------------------------
@@ -631,7 +638,10 @@ export const movimientosService = {
    *  - Si hay `proveedorId` + `factura`, no puede repetirse el comprobante
    *    `(proveedorid, numero, serie)` — con `serie` nula se compara solo
    *    `(proveedorid, numero)`.
-   *  - Recalcula `producto.precioref` con la moda de los últimos ingresos.
+   *  - Actualiza `producto.precioref` con el **último costo unitario válido**
+   *    (`costounit > 0`) del producto dentro de esta transacción, redondeado a
+   *    2 decimales. Si todas las líneas llegan con costo 0 (o sin costo), el
+   *    `precioref` vigente **no** se sobrescribe.
    *
    * Lanza `MovimientoError` (400/404/409) para errores de negocio.
    */
@@ -825,13 +835,8 @@ export const movimientosService = {
 
         const resultadoLineas: IngresoLineaResultadoDTO[] = [];
 
-        // Agrupar por producto para recalcular `precioref` una sola vez por producto
-        const nuevoCostoPorProducto = new Map<string, number>();
-        for (const linea of lineas) {
-          if (!nuevoCostoPorProducto.has(linea.productoId)) {
-            nuevoCostoPorProducto.set(linea.productoId, linea.costo);
-          }
-        }
+        // Productos presentes en el ingreso (se resuelve `precioref` una sola vez por producto)
+        const productoIdsIngreso = [...new Set(lineas.map((l) => l.productoId))];
 
         for (const linea of lineas) {
           const producto = productosMap.get(linea.productoId)!;
@@ -854,41 +859,42 @@ export const movimientosService = {
             costoUnitario: linea.costo,
             unidad: producto.unidadid,
             loteId: linea.loteId,
-            preciorefActualizado: 0, // se completa tras recalcular
+            preciorefActualizado: 0, // se completa tras actualizar `precioref`
           });
         }
 
-        // Recalcular `precioref` con la moda (solo productos con costo real informado)
-        for (const [productoId, costoNuevo] of nuevoCostoPorProducto) {
-          const costoOmitido = costoTodosOmitidos(lineas, productoId);
+        // Actualizar `producto.precioref` con el último costo unitario válido
+        // de esta transacción. Si todas las líneas del producto vienen con
+        // costo 0 / omitido, se conserva el `precioref` vigente (no se pisa con 0).
+        for (const productoId of productoIdsIngreso) {
+          const costoValido = ultimoCostoValido(lineas, productoId);
+          const nuevoPrecioRef = costoValido === null ? null : normalizarPrecioref(costoValido);
 
-          const ultimosIngresos = await tx.documento_item.findMany({
-            where: {
-              productoid: productoId,
-              documento: { tipo: "INGRESO", estado: "APROBADO" },
-            },
-            orderBy: { createdat: "desc" },
-            take: 10,
-            select: { costounit: true },
-          });
+          let preciorefResultante: number;
 
-          const precios = ultimosIngresos
-            .map((u) => aNumero(u.costounit))
-            .filter((p): p is number => p !== null);
-
-          if (precios.length === 0) precios.push(costoNuevo);
-
-          const nuevoPrecioRef = calcularModa(precios);
-
-          if (!(costoOmitido && nuevoPrecioRef === 0)) {
+          if (nuevoPrecioRef === null) {
+            // Sin costo válido (o fuera del rango de Decimal(12,2)): no se toca el
+            // producto; se devuelve el precio de referencia que queda vigente.
+            if (costoValido !== null) {
+              console.warn(
+                `[registrarIngreso] Costo ${costoValido} fuera de rango para producto.precioref (producto ${productoId}); no se actualiza.`
+              );
+            }
+            const actual = await tx.producto.findUnique({
+              where: { id: productoId },
+              select: { precioref: true },
+            });
+            preciorefResultante = normalizarPrecioref(aNumero(actual?.precioref) ?? 0) ?? 0;
+          } else {
             await tx.producto.update({
               where: { id: productoId },
               data: { precioref: new Prisma.Decimal(nuevoPrecioRef) },
             });
+            preciorefResultante = nuevoPrecioRef;
           }
 
           for (const r of resultadoLineas) {
-            if (r.productoid === productoId) r.preciorefActualizado = nuevoPrecioRef;
+            if (r.productoid === productoId) r.preciorefActualizado = preciorefResultante;
           }
         }
 
@@ -1005,7 +1011,9 @@ export const movimientosService = {
         const verCostos = puedeVerCostos(usuario?.rol);
 
     const productos: ProductoEnMovimientoDTO[] = doc.documento_item.map((item) => {
-      const cantidadNum = Number(item.cantidad) || 0;
+      // `item.cantidad` llega como `Prisma.Decimal`; se convierte SIEMPRE a
+      // `number` puro (nunca se propaga el Decimal ni un string sin parsear).
+      const cantidadNum = aNumero(item.cantidad) ?? 0;
       const unidad = item.unidad?.abreviatura ?? "";
       const loteCodigo = item.lote?.codigo ?? null;
       const loteId = item.lote?.id ?? null;

@@ -142,6 +142,25 @@ router.post(
 );
 
 // ==========================================
+// Snapshot de `precioref` para salidas / ajustes
+// ==========================================
+/**
+ * Convierte `producto.precioref` en el valor a guardar como snapshot historico
+ * en `documento_item.precioref`.
+ *
+ * Estas operaciones (SALIDA, AJUSTE, DEVOLUCION a proveedor) no manejan costo
+ * unitario propio, por lo que si el precio de referencia del producto no es
+ * valido o es 0 se devuelve `undefined` y la columna queda en `null` (no se
+ * escribe un 0 enganoso).
+ */
+function snapshotPrecioref(precioref: unknown): Prisma.Decimal | undefined {
+  if (precioref === null || precioref === undefined) return undefined;
+  const n = Number(precioref);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return new Prisma.Decimal(Math.round((n + Number.EPSILON) * 100) / 100);
+}
+
+// ==========================================
 // POST /api/movimientos/ingreso
 // Solo ADMIN y BODEGUERO (mismo criterio que /ajuste y /devolucion-proveedor)
 // ==========================================
@@ -215,7 +234,9 @@ router.post("/ajuste", authenticateToken, async (req: AuthRequest, res: Response
         const documento = await tx.documento.create({ data: { tipo: "AJUSTE", estado: "APROBADO", consecutivo: codigoGenerado, fecha: new Date(), creadorid: userId, bodegaorigenid: bodegaDefault?.id, observacion: notas } });
         const prod = await tx.producto.findUnique({ where: { id: productoId } });
         if (!prod) throw new Error("Producto no encontrado");
-        await tx.documento_item.create({ data: { documentoid: documento.id, productoid: productoId, unidadid: prod.unidadid, cantidad: Number(cantidad), notas: `Ajuste manual (${tipo})` } });
+        // Snapshot historico: los ajustes no traen `costounit`, asi que se guarda
+        // el `precioref` vigente del producto (si es > 0) en la linea.
+        await tx.documento_item.create({ data: { documentoid: documento.id, productoid: productoId, unidadid: prod.unidadid, cantidad: Number(cantidad), precioref: snapshotPrecioref(prod.precioref), notas: `Ajuste manual (${tipo})` } });
         return documento;
     });
     res.json({ ok: true, documento: resultado });
@@ -253,7 +274,7 @@ router.post("/devolucion-proveedor", authenticateToken, async (req: AuthRequest,
           for (const item of items) {
               const prod = await tx.producto.findUnique({ where: { id: item.productoId } });
               if (!prod) throw new Error("Producto no encontrado");
-              await tx.documento_item.create({ data: { documentoid: documento.id, productoid: item.productoId, unidadid: prod.unidadid, cantidad: Number(item.cantidad), notas: item.notas } });
+              await tx.documento_item.create({ data: { documentoid: documento.id, productoid: item.productoId, unidadid: prod.unidadid, cantidad: Number(item.cantidad), precioref: snapshotPrecioref(prod.precioref), notas: item.notas } });
           }
           return documento;
       });

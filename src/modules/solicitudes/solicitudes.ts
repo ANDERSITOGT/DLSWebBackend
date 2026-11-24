@@ -1,5 +1,6 @@
 import { Router, Response } from "express";
 import prisma from "../../core/prisma";
+import { Prisma } from "@prisma/client";
 import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
 import solicitudesService from "./solicitudesService";
 
@@ -241,6 +242,21 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
             }
         }
 
+        // Snapshot historico: los documentos de SALIDA / DEVOLUCION generados
+        // desde una solicitud no llevan costo unitario propio, asi que se guarda
+        // el `precioref` vigente del producto (si es > 0) en la linea.
+        const prodPrecio = await tx.producto.findUnique({
+          where: { id: item.productoid },
+          select: { precioref: true },
+        });
+        const precioRef = prodPrecio?.precioref;
+        const precioRefNum =
+          precioRef === null || precioRef === undefined ? null : Number(precioRef);
+        const preciorefSnapshot =
+          precioRefNum !== null && Number.isFinite(precioRefNum) && precioRefNum > 0
+            ? new Prisma.Decimal(Math.round((precioRefNum + Number.EPSILON) * 100) / 100)
+            : undefined;
+
         await tx.documento_item.create({
           data: {
             documentoid: documento.id,
@@ -248,6 +264,7 @@ router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Re
             unidadid: item.unidadid,
             cantidad: item.cantidad,
             loteid: item.loteid,
+            precioref: preciorefSnapshot,
             notas: item.notas
           }
         });
