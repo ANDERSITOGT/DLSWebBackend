@@ -164,24 +164,147 @@ Lectura de lista y escritura limitadas a `ADMIN` y `BODEGUERO`.
 
 ## Solicitudes – `/api/solicitudes`
 
-Un `SOLICITANTE` solo ve las suyas (detalle ajeno → **403**).
+Un `SOLICITANTE` solo ve las suyas (listado forzado a su `id`, detalle/export ajenos → **403**).
+Todas las rutas exigen token 🔒 (incluido `/export`, que **ya no es pública**).
 
 | Método | Ruta | Auth | Body / Query | Descripción | Respuesta |
 |---|---|---|---|---|---|
-| GET | `/` | 🔒 | `estado`, `tipo` | Lista solicitudes (máx 50). | **envuelto** `{ solicitudes: [...] }` |
-| GET | `/:id` | 🔒 | – | Detalle. | objeto detalle (`productos[]`, `bodega`, `solicitante`) |
+| GET | `/` | 🔒 | `estado`, `tipo`, `bodegaId`, `q`, `page` (def. `1`), `limit` (def. `15`, **máx 100**) | Lista **paginada** y filtrada. | **envuelto** `{ ok: true, solicitudes: [...], meta }` |
+| GET | `/:id` | 🔒 | – | Detalle completo (con `aprobador`, `costounit`, `subtotal`, `montoTotal`, `historial`). | objeto `SolicitudDetalleDTO` |
 | POST | `/` | 🔒 | `{ tipo, solicitanteId?, bodegaid?, fecha?, productos\|items: [{ productoId, unidadId?, cantidad, loteId?, notas? }] }` | Crea solicitud (DESPACHO o DEVOLUCION). | `{ ok: true, solicitud }` (201) |
-| PATCH | `/:id/estado` | 🔒 | `{ estado }` | Aprueba/rechaza/etc. | detalle |
-| POST | `/:id/entregar` | 🔒 | – | Genera documento SALIDA/DEVOLUCION, mueve inventario y marca ENTREGADA. | `{ solicitud, documentoId, codigoDoc }` |
-| GET | `/:id/export` | – (público) | – | PDF de la solicitud. | `application/pdf` |
+| PATCH | `/:id/estado` | 🔒 ADMIN/BODEGUERO | `{ estado, motivo? }` | Aprueba/rechaza (máquina de estados estricta). | detalle |
+| POST | `/:id/entregar` | 🔒 ADMIN/BODEGUERO | – | Genera documento SALIDA/DEVOLUCION, mueve inventario y marca ENTREGADA. | `{ solicitud, documentoId, codigoDoc }` |
+| GET | `/:id/export` | 🔒 | – | PDF del detalle de la solicitud. | `application/pdf` |
+
+### Máquina de estados (estricta)
+
+```
+PENDIENTE  -> APROBADA | RECHAZADA
+APROBADA   -> RECHAZADA          (ENTREGADA solo vía POST /:id/entregar)
+RECHAZADA  -> (terminal)
+ENTREGADA  -> (terminal)
+```
+
+- `PATCH /:id/estado` **no** acepta `ENTREGADA` (→ **400** `TRANSICION_INVALIDA`); solo `entregar` produce ese estado.
+- Transición no permitida → **400** `{ message: "Transición no permitida: X → Y ...", codigo: "TRANSICION_INVALIDA" }`.
+- `aprobador` se fija solo al APROBAR; un rechazo posterior no lo pisa.
+
+### `GET /` — listado paginado
+
+| Query | Tipo | Notas |
+|---|---|---|
+| `estado` | enum | `PENDIENTE \| APROBADA \| RECHAZADA \| ENTREGADA` (valor inválido → **400** `ESTADO_INVALIDO`). |
+| `tipo` | enum | `DESPACHO \| DEVOLUCION` (valor inválido → **400** `TIPO_INVALIDO`). |
+| `bodegaId` | uuid | Filtra por bodega. |
+| `q` | string | Case-insensitive por `solicitud.id` (código `SOL-YYYY-NNNN`) **o** nombre/código de producto. |
+| `page` | int | Default `1`. |
+| `limit` | int | Default `15`, **máx 100**. |
+
+Respuesta:
+```ts
+{
+  ok: true,
+  solicitudes: [{
+    id: string,               // código, p. ej. "SOL-2026-0001"
+    codigo: string,           // = id
+    fecha: string | null,     // ISO
+    estado: "PENDIENTE" | "APROBADA" | "RECHAZADA" | "ENTREGADA",
+    tipo: "DESPACHO" | "DEVOLUCION",
+    bodegaNombre: string,
+    solicitanteNombre: string,
+    totalProductos: number,
+    yaDevuelta: boolean       // true si ya tiene una devolución activa
+  }],
+  meta: { total: number, page: number, limit: number, totalPages: number }
+}
+```
+
+### `GET /:id` — detalle (`SolicitudDetalleDTO`)
+
+```ts
+{
+  id: string,
+  codigo: string,
+  fecha: string | null,
+  estado: "PENDIENTE" | "APROBADA" | "RECHAZADA" | "ENTREGADA",
+  tipo: "DESPACHO" | "DEVOLUCION",
+  solicitante: { id: string, nombre: string },
+  aprobador: { id: string, nombre: string } | null,   // quién aprobó
+  bodega: { id: string, nombre: string } | null,
+  productos: [{
+    itemId: string,
+    productoId: string,
+    productoObjId: string | undefined,
+    nombre: string,
+    codigo: string,
+    cantidad: number,
+    unidad: string,            // abreviatura
+    unidadNombre: string,
+    loteId: string | null,
+    loteCodigo: string,
+    cultivo: string,
+    notas: string | null,
+    costounit: number | null,  // null si el rol no ve costos o la línea no tiene costo
+    subtotal: number | null    // cantidad * costounit (2 dec); null en las mismas condiciones
+  }],
+  documentoSalidaId: string | null,
+  documentoSalidaConsecutivo: string | null,
+  montoTotal: number | null,   // null si el rol no ve costos o no hay costos
+  historial: [{                // eventos de auditoría (entidad SOLICITUD), orden ascendente
+    accion: "CREAR" | "APROBAR" | "RECHAZAR" | "ENTREGAR",
+    fecha: string | null,      // ISO
+    usuario: { id: string, nombre: string } | null,
+    payload: object | null
+  }]
+}
+```
+
+**Visibilidad de importes:** `costounit`, `subtotal` y `montoTotal` llegan como `null`
+para roles **`SOLICITANTE`, `VISOR` y `COSECHA`**. Solo `ADMIN` y `BODEGUERO` ven importes
+(aplica igual en el PDF de `/:id/export`). Los costos se congelan en `documento_item` al entregar.
+
+### `PATCH /:id/estado`
+
+- **Solo `ADMIN` o `BODEGUERO`** (otro rol → **403** `SIN_PERMISO`).
+- Body: `{ estado, motivo? }`. `motivo` es texto libre (recomendado al rechazar) y queda en la auditoría.
+- Un `SOLICITANTE` **no** puede usar esta ruta (no es aprobador → **403** `SIN_PERMISO`).
+
+### `POST /:id/entregar`
+
+- **Solo `ADMIN` o `BODEGUERO`** (otro rol → **403**).
+- Solo se entrega una solicitud **APROBADA**:
+  - Estado ≠ APROBADA y no procesada → **400** `SOLICITUD_NO_APROBADA`.
+  - Ya `ENTREGADA`/`RECHAZADA` → **409** `SOLICITUD_YA_PROCESADA`.
+- El paso a `ENTREGADA` es un `updateMany` condicionado (idempotente); si otra transacción ganó → **409** `SOLICITUD_YA_PROCESADA`.
+- Genera documento `SALIDA` (DESPACHO) o `DEVOLUCION` (DEVOLUCIÓN) en estado `APROBADO` y mueve inventario.
+- Valida stock al momento (solo DESPACHO) → **400** `STOCK_INSUFICIENTE`.
+- `solicitud.aprobadorid` **no** se sobrescribe: conserva a quien aprobó. Quien entrega queda en `documento.creadorid` y en auditoría.
+- Costeo congelado por línea: DESPACHO usa `producto.precioref` > 0 o, en su defecto, el último `costounit` de un INGRESO aprobado; DEVOLUCIÓN hereda el costo del documento de salida de origen (o cae a `precioref`).
+
+Respuesta:
+```ts
+{
+  solicitud: { id, estado: "ENTREGADA", aprobadorid: string | null, documentosalidaid: string | null },
+  documentoId: string,
+  codigoDoc: string            // "SAL-2026-0001" | "DEV-2026-0001"
+}
+```
+
+### Códigos de error del módulo (`{ message, codigo }`)
+
+`SOLICITUD_NO_ENCONTRADA` (404), `SIN_PERMISO` (403), `ESTADO_INVALIDO` / `TIPO_INVALIDO` (400),
+`TRANSICION_INVALIDA` (400), `SOLICITUD_NO_APROBADA` (400), `SOLICITUD_YA_PROCESADA` (409),
+`SOLICITUD_SIN_ITEMS` (400), `STOCK_INSUFICIENTE` (400), `DEVOLUCION_DUPLICADA` (409),
+`LOTE_NO_ASIGNADO` (400), `SOLICITANTE_REQUERIDO` (400).
 
 Notas del POST:
 - Acepta tanto `productos` como `items` (mismo array).
 - Acepta `productoId`/`productoid`, `unidadId`/`unidadid`, `loteId`/`loteid` (camelCase o minúsculas).
+- Acepta `solicitudOrigenId`/`solicitud_origen_id`.
 - Si falta `unidadId`, se toma la unidad del producto.
 - `SOLICITANTE` con `loteId` sin asignación → **400** `"SEGURIDAD: No tienes permiso asignado para el lote ..."`.
 - En DESPACHO se valida stock disponible → **400** `"Stock insuficiente para ..."`.
-- No se puede duplicar una devolución activa para la misma solicitud origen.
+- No se puede duplicar una devolución activa para la misma solicitud origen → **409** `DEVOLUCION_DUPLICADA`.
 
 ---
 
@@ -553,9 +676,8 @@ Si llegan `proveedorId` **y** `factura` (no vacía):
 - `GET /api/categorias`
 - `GET /api/productos/categorias`, `/unidades`, `/productos-busqueda`, `/productos/buscar`
 - `GET /api/proveedores/catalogo`
-- `GET /api/solicitudes/:id/export`
 
-> 📌 `GET /api/movimientos/export` y `/api/movimientos/:id/export` **ya no son públicas**: ahora exigen token (🔒).
+> 📌 `GET /api/movimientos/export`, `/api/movimientos/:id/export` **y** `GET /api/solicitudes/:id/export` **ya no son públicas**: ahora exigen token (🔒).
 
 Todo lo demás requiere `Authorization: Bearer <token>`.
 

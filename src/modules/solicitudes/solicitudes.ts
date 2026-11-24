@@ -1,30 +1,103 @@
 import { Router, Response } from "express";
 import prisma from "../../core/prisma";
-import { Prisma } from "@prisma/client";
 import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
-import solicitudesService from "./solicitudesService";
+import solicitudesService, {
+  SolicitudError,
+  ESTADOS_SOLICITUD,
+  TIPOS_SOLICITUD,
+  LIMITE_PAGINA_DEFAULT,
+  LIMITE_PAGINA_MAX,
+  type EstadoSolicitud,
+  type TipoSolicitud,
+} from "./solicitudesService";
 
 const router = Router();
 
 // ===============================
+// HELPERS DE LA CAPA HTTP
+// ===============================
+/** Roles con permiso para aprobar / rechazar solicitudes. */
+const ROLES_APROBADORES = new Set<string>(["ADMIN", "BODEGUERO"]);
+/** Roles con permiso para despachar fisicamente (entregar). */
+const ROLES_ENTREGADORES = new Set<string>(["ADMIN", "BODEGUERO"]);
+
+function esEstadoValido(valor: unknown): valor is EstadoSolicitud {
+  return typeof valor === "string" && (ESTADOS_SOLICITUD as readonly string[]).includes(valor);
+}
+
+function esTipoValido(valor: unknown): valor is TipoSolicitud {
+  return typeof valor === "string" && (TIPOS_SOLICITUD as readonly string[]).includes(valor);
+}
+
+/** Lee un entero de query string, con valor por defecto y tope maximo. */
+function leerEntero(valor: unknown, porDefecto: number, maximo: number): number {
+  const n = Number(Array.isArray(valor) ? valor[0] : valor);
+  if (!Number.isFinite(n) || n <= 0) return porDefecto;
+  return Math.min(Math.trunc(n), maximo);
+}
+
+function leerString(valor: unknown): string | undefined {
+  const v = Array.isArray(valor) ? valor[0] : valor;
+  if (typeof v !== "string") return undefined;
+  const limpio = v.trim();
+  return limpio.length > 0 ? limpio : undefined;
+}
+
+/**
+ * Traduce cualquier error a una respuesta HTTP consistente.
+ * - SolicitudError -> su statusCode y codigo de negocio.
+ * - Cualquier otro -> 500 generico sin filtrar detalles internos.
+ */
+function responderError(res: Response, error: unknown, contexto: string) {
+  if (error instanceof SolicitudError) {
+    return res.status(error.statusCode).json({
+      message: error.message,
+      ...(error.codigo ? { codigo: error.codigo } : {}),
+    });
+  }
+  console.error(`Error en ${contexto}:`, error);
+  return res.status(500).json({ message: "Error interno del servidor" });
+}
+
+// ===============================
 // GET /api/solicitudes
-// Listar
+// Listar (paginado y filtrado)
 // ===============================
 router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { estado, tipo } = req.query;
-    const usuario = req.user; 
+    const { estado, tipo, bodegaId, q, page, limit } = req.query;
+    const usuario = req.user;
 
-    const data = await solicitudesService.getSolicitudes({
-      estado: estado as any,
-      tipo: tipo as any, 
+    if (estado !== undefined && !esEstadoValido(estado)) {
+      return res.status(400).json({
+        message: `Parametro 'estado' invalido. Valores permitidos: ${ESTADOS_SOLICITUD.join(", ")}.`,
+        codigo: "ESTADO_INVALIDO",
+      });
+    }
+    if (tipo !== undefined && !esTipoValido(tipo)) {
+      return res.status(400).json({
+        message: `Parametro 'tipo' invalido. Valores permitidos: ${TIPOS_SOLICITUD.join(", ")}.`,
+        codigo: "TIPO_INVALIDO",
+      });
+    }
+
+    const resultado = await solicitudesService.getSolicitudes({
+      filtros: {
+        estado: esEstadoValido(estado) ? estado : undefined,
+        tipo: esTipoValido(tipo) ? tipo : undefined,
+        bodegaId: leerString(bodegaId),
+        q: leerString(q),
+      },
+      paginacion: {
+        page: leerEntero(page, 1, Number.MAX_SAFE_INTEGER),
+        limit: leerEntero(limit, LIMITE_PAGINA_DEFAULT, LIMITE_PAGINA_MAX),
+      },
       usuario: usuario ? { id: usuario.id, rol: usuario.rol } : undefined,
     });
-    
-    res.json({ solicitudes: data }); 
+
+    res.json({ ok: true, solicitudes: resultado.data, meta: resultado.meta });
   } catch (error) {
-    console.error("Error en GET /api/solicitudes:", error);
-    res.status(500).json({ message: "Error al obtener solicitudes" });
+    responderError(res, error, "GET /api/solicitudes");
   }
 });
 
@@ -35,17 +108,29 @@ router.get("/", authenticateToken, async (req: AuthRequest, res: Response) => {
 router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id;
-    const data = await solicitudesService.getDetalleSolicitud(id);
-    
-    // Seguridad: Solicitante solo ve lo suyo
-    if (req.user?.rol === "SOLICITANTE" && data.solicitante.id !== req.user.id) {
-        return res.status(403).json({ message: "No tienes permiso para ver esta solicitud." });
+    const rol = req.user?.rol ?? null;
+
+    if (rol === "SOLICITANTE") {
+      const solicitanteId = await solicitudesService.getSolicitanteId(id);
+      if (!solicitanteId) {
+        return res.status(404).json({
+          message: `Solicitud ${id} no encontrada`,
+          codigo: "SOLICITUD_NO_ENCONTRADA",
+        });
+      }
+      if (solicitanteId !== req.user?.id) {
+        return res.status(403).json({
+          message: "No tienes permiso para ver esta solicitud.",
+          codigo: "SIN_PERMISO",
+        });
+      }
     }
 
+    // El rol se propaga para ocultar importes a quien no puede verlos.
+    const data = await solicitudesService.getDetalleSolicitud(id, rol);
     res.json(data);
   } catch (error) {
-    console.error("Error en GET /api/solicitudes/:id:", error);
-    res.status(500).json({ message: "Error al obtener detalle" });
+    responderError(res, error, "GET /api/solicitudes/:id");
   }
 });
 
@@ -54,240 +139,216 @@ router.get("/:id", authenticateToken, async (req: AuthRequest, res: Response) =>
 // Crear (Universal: Soporta Despachos y Devoluciones)
 // ===============================
 router.post("/", authenticateToken, async (req: AuthRequest, res: Response) => {
-  console.log("📥 Recibiendo solicitud:", req.body);
-
   try {
     const user = req.user;
-    if (!user) return res.status(401).json({ message: "Usuario no autenticado" });
-
-    // 1. DETECCIÓN INTELIGENTE DE ITEMS
-    // El frontend a veces manda 'productos' (Despachos) y a veces 'items' (Devoluciones)
-    // Aquí capturamos cualquiera de los dos.
-    const itemsEntrantes = req.body.productos || req.body.items || [];
-
-    if (itemsEntrantes.length === 0) {
-        return res.status(400).json({ message: "La solicitud no contiene productos/items." });
+    if (!user) {
+      return res.status(401).json({ message: "Usuario no autenticado", codigo: "NO_AUTENTICADO" });
     }
 
-    // 2. NORMALIZACIÓN DE DATOS
-    const productosMapeados = await Promise.all(itemsEntrantes.map(async (item: any) => {
-        // A. Normalizar IDs (Soportar camelCase y lowercase)
-        const rawProductoId = item.productoid || item.productoId;
-        const rawUnidadId = item.unidadid || item.unidadId;
-        const rawLoteId = item.loteid || item.loteId;
-        
-        // B. Recuperar Unidad si falta (Caso Devoluciones)
+    // 1. DETECCION INTELIGENTE DE ITEMS
+    // El frontend a veces manda 'productos' (Despachos) y a veces 'items' (Devoluciones).
+    const itemsEntrantes = req.body?.productos || req.body?.items || [];
+
+    if (!Array.isArray(itemsEntrantes) || itemsEntrantes.length === 0) {
+      return res.status(400).json({
+        message: "La solicitud no contiene productos/items.",
+        codigo: "SIN_ITEMS",
+      });
+    }
+
+    // Tipo y origen (aceptar camelCase y snake_case).
+    const tipoEntrante = req.body?.tipo;
+    if (tipoEntrante !== undefined && !esTipoValido(tipoEntrante)) {
+      return res.status(400).json({
+        message: `Tipo de solicitud invalido. Valores permitidos: ${TIPOS_SOLICITUD.join(", ")}.`,
+        codigo: "TIPO_INVALIDO",
+      });
+    }
+    const tipoFinal: TipoSolicitud = esTipoValido(tipoEntrante)
+      ? tipoEntrante
+      : TIPOS_SOLICITUD[0];
+
+    const solicitudOrigenId =
+      leerString(req.body?.solicitudOrigenId) || leerString(req.body?.solicitud_origen_id);
+
+    // 2. NORMALIZACION DE DATOS
+    const productosMapeados = await Promise.all(
+      itemsEntrantes.map(async (item: any) => {
+        // A. Normalizar IDs (soportar camelCase y lowercase)
+        const rawProductoId = item?.productoid || item?.productoId;
+        const rawUnidadId = item?.unidadid || item?.unidadId;
+        const rawLoteId = item?.loteid || item?.loteId;
+
+        if (!rawProductoId) {
+          throw new SolicitudError(
+            "Cada item debe incluir 'productoid' (o 'productoId').",
+            400,
+            "ITEM_INVALIDO"
+          );
+        }
+
+        // B. Recuperar Unidad si falta (caso Devoluciones)
         let unidadIdFinal = rawUnidadId;
-        if (!unidadIdFinal && rawProductoId) {
-            const prod = await prisma.producto.findUnique({
-                where: { id: rawProductoId },
-                select: { unidadid: true }
-            });
-            unidadIdFinal = prod?.unidadid;
+        if (!unidadIdFinal) {
+          const prod = await prisma.producto.findUnique({
+            where: { id: rawProductoId },
+            select: { unidadid: true },
+          });
+          if (!prod) {
+            throw new SolicitudError(
+              `Producto ${rawProductoId} no encontrado.`,
+              400,
+              "PRODUCTO_NO_ENCONTRADO"
+            );
+          }
+          unidadIdFinal = prod.unidadid;
         }
 
         // C. Normalizar Cantidad
-        // Prioridad: Cantidad del item > Cantidad global > 0
-        const cantidadFinal = item.cantidad ? Number(item.cantidad) : Number(req.body.cantidad);
+        // Prioridad: cantidad del item > cantidad global > 0
+        const cantidadFinal = item?.cantidad ? Number(item.cantidad) : Number(req.body?.cantidad);
+        if (!Number.isFinite(cantidadFinal) || cantidadFinal <= 0) {
+          throw new SolicitudError(
+            `Cantidad invalida para el producto ${rawProductoId}.`,
+            400,
+            "CANTIDAD_INVALIDA"
+          );
+        }
 
         return {
-            productoid: rawProductoId,
-            unidadid: unidadIdFinal, // Ahora seguro tiene valor
-            cantidad: cantidadFinal,
-            loteid: rawLoteId,
-            notas: item.notas || ""
+          productoid: rawProductoId,
+          unidadid: unidadIdFinal,
+          cantidad: cantidadFinal,
+          loteid: rawLoteId || null,
+          notas: item?.notas || "",
         };
-    }));
+      })
+    );
 
     // 3. LLAMAR AL SERVICIO
-    // Ahora le pasamos 'productos' (que es lo que espera) con el array corregido
-    const nuevaSolicitud = await solicitudesService.crearSolicitud({
-        ...req.body,
-        solicitanteid: req.body.solicitanteId || user.id, 
-        productos: productosMapeados 
-    }, { id: user.id, rol: user.rol });
+    const nuevaSolicitud = await solicitudesService.crearSolicitud(
+      {
+        fecha: req.body?.fecha,
+        bodegaid: req.body?.bodegaid ?? req.body?.bodegaId ?? null,
+        // Un ADMIN puede crear a nombre de otro; el resto siempre a su nombre.
+        solicitanteid: req.body?.solicitanteId || req.body?.solicitanteid || user.id,
+        tipo: tipoFinal,
+        solicitudOrigenId,
+        productos: productosMapeados,
+      },
+      { id: user.id, rol: user.rol }
+    );
 
-    console.log("✅ Solicitud creada con items:", nuevaSolicitud.id);
     res.status(201).json({ ok: true, solicitud: nuevaSolicitud });
-
-  } catch (error: any) {
-    console.error("❌ Error al guardar solicitud:", error);
-    res.status(400).json({ message: error.message || "Error interno al guardar" });
+  } catch (error) {
+    responderError(res, error, "POST /api/solicitudes");
   }
 });
 
 // ===============================
-// PATCH /:id/estado
-// Cambiar Estado
+// PATCH /api/solicitudes/:id/estado
+// Aprobar / Rechazar (maquina de estados estricta)
 // ===============================
 router.patch("/:id/estado", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id;
-    const { estado } = req.body; 
-    const aprobadorId = req.user?.id; 
+    const { estado, motivo } = req.body ?? {};
+    const usuario = req.user;
 
-    const data = await solicitudesService.actualizarEstadoSolicitud(id, estado, aprobadorId);
+    if (!usuario) {
+      return res.status(401).json({ message: "Usuario no autenticado", codigo: "NO_AUTENTICADO" });
+    }
+
+    if (!esEstadoValido(estado)) {
+      return res.status(400).json({
+        message: `Estado invalido. Valores permitidos: ${ESTADOS_SOLICITUD.join(", ")}.`,
+        codigo: "ESTADO_INVALIDO",
+      });
+    }
+
+    if (!ROLES_APROBADORES.has(usuario.rol ?? "")) {
+      return res.status(403).json({
+        message: "Solo ADMIN o BODEGUERO pueden aprobar o rechazar solicitudes.",
+        codigo: "SIN_PERMISO",
+      });
+    }
+
+    const data = await solicitudesService.actualizarEstadoSolicitud(
+      id,
+      estado,
+      usuario.id,
+      typeof motivo === "string" ? motivo : null,
+      usuario.rol
+    );
+
     res.json(data);
   } catch (error) {
-    console.error("Error en PATCH /api/solicitudes/:id/estado:", error);
-    res.status(500).json({ message: "Error al actualizar estado" });
+    responderError(res, error, "PATCH /api/solicitudes/:id/estado");
   }
 });
 
 // ===============================
-// GET /:id/export
+// GET /api/solicitudes/:id/export
 // PDF
 // ===============================
-router.get("/:id/export", async (req, res) => {
+router.get("/:id/export", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id;
+
+    // Mismo aislamiento que el detalle: el SOLICITANTE solo exporta lo suyo.
+    if (req.user?.rol === "SOLICITANTE") {
+      const solicitanteId = await solicitudesService.getSolicitanteId(id);
+      if (!solicitanteId) {
+        return res.status(404).json({
+          message: `Solicitud ${id} no encontrada`,
+          codigo: "SOLICITUD_NO_ENCONTRADA",
+        });
+      }
+      if (solicitanteId !== req.user.id) {
+        return res.status(403).json({
+          message: "No tienes permiso para ver esta solicitud.",
+          codigo: "SIN_PERMISO",
+        });
+      }
+    }
+
     const { filename, mime, content } = await solicitudesService.exportSolicitudDetallePDF(id);
 
     res.setHeader("Content-Type", mime);
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(content);
   } catch (error) {
-    console.error("Error en GET /api/solicitudes/:id/export:", error);
-    res.status(500).send("Error al exportar PDF");
+    responderError(res, error, "GET /api/solicitudes/:id/export");
   }
 });
 
 // ===============================
-// POST /:id/entregar
-// Generar Documento de Salida/Devolución
-// (LÓGICA ORIGINAL MANTENIDA)
+// POST /api/solicitudes/:id/entregar
+// Generar Documento de Salida/Devolucion + marcar ENTREGADA
 // ===============================
 router.post("/:id/entregar", authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id;
-    const userId = req.user?.id; 
+    const usuario = req.user;
 
-    if (!userId) {
-        return res.status(401).json({ message: "No se pudo identificar al usuario que realiza la entrega." });
+    if (!usuario?.id) {
+      return res.status(401).json({
+        message: "No se pudo identificar al usuario que realiza la entrega.",
+        codigo: "NO_AUTENTICADO",
+      });
     }
 
-    const resultado = await prisma.$transaction(async (tx) => {
-      // 1. Obtener solicitud
-      const solicitud = await tx.solicitud.findUnique({
-        where: { id },
-        include: { solicitud_item: true }
+    if (!ROLES_ENTREGADORES.has(usuario.rol ?? "")) {
+      return res.status(403).json({
+        message: "Solo ADMIN o BODEGUERO pueden entregar solicitudes.",
+        codigo: "SIN_PERMISO",
       });
+    }
 
-      if (!solicitud) throw new Error("Solicitud no encontrada");
-      
-      if (solicitud.estado === "ENTREGADA" || solicitud.estado === "RECHAZADA") {
-          throw new Error(`La solicitud ya está en estado ${solicitud.estado} y no se puede procesar nuevamente.`);
-      }
-
-      // IMPORTANTE: Manejo seguro del campo 'tipo'
-      const tipoReal = (solicitud as any).tipo || "DESPACHO";
-      const esDespacho = tipoReal === "DESPACHO";
-      const tipoDocumento = esDespacho ? "SALIDA" : "DEVOLUCION";
-
-      // 2. Consecutivo Documento
-      const anioActual = new Date().getFullYear();
-      let nuevoCorrelativo = 1;
-      const prefijo = esDespacho ? "SAL" : "DEV";
-
-      const contador = await tx.consecutivo.findUnique({
-          where: { tipo_anio: { tipo: tipoDocumento, anio: anioActual } }
-      });
-
-      if (contador) {
-          const actualizado = await tx.consecutivo.update({
-              where: { id: contador.id },
-              data: { ultimo: { increment: 1 } }
-          });
-          nuevoCorrelativo = actualizado.ultimo || 1;
-      } else {
-          await tx.consecutivo.create({
-              data: { tipo: tipoDocumento, anio: anioActual, ultimo: 1, prefijo }
-          });
-          nuevoCorrelativo = 1;
-      }
-      
-      const codigoDoc = `${prefijo}-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
-
-      // 3. Crear Documento Final
-      const documento = await tx.documento.create({
-        data: {
-          tipo: tipoDocumento,
-          estado: "APROBADO",
-          fecha: new Date(),
-          creadorid: userId,
-          bodegaorigenid: esDespacho ? solicitud.bodegaid : null,   
-          bodegadestinoid: !esDespacho ? solicitud.bodegaid : null, 
-          solicitanteid: solicitud.solicitanteid,
-          consecutivo: codigoDoc,
-          observacion: `Generado automáticamente desde Solicitud ${solicitud.id} (${tipoReal})`
-        }
-      });
-
-      // 4. Mover Items y Validar Stock Final (Solo si es despacho)
-      for (const item of solicitud.solicitud_item) {
-        if (esDespacho) {
-             const ingresos = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"INGRESO", estado:"APROBADO"}}});
-             const salidas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"SALIDA", estado:"APROBADO"}}});
-             const ajustes = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"AJUSTE", estado:"APROBADO"}}});
-             const devInternas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"DEVOLUCION", estado:"APROBADO", proveedorid:null}}});
-             const devExternas = await tx.documento_item.aggregate({_sum:{cantidad:true}, where:{productoid:item.productoid, documento:{tipo:"DEVOLUCION", estado:"APROBADO", NOT:{proveedorid:null}}}});
-
-             const stockFisicoAlMomento = 
-               ((Number(ingresos._sum.cantidad)||0) + (Number(devInternas._sum.cantidad)||0) + (Number(ajustes._sum.cantidad)||0)) - 
-               ((Number(salidas._sum.cantidad)||0) + (Number(devExternas._sum.cantidad)||0));
-            
-            if (stockFisicoAlMomento < Number(item.cantidad)) {
-                const prod = await tx.producto.findUnique({ where: { id: item.productoid }, select: { nombre: true } });
-                throw new Error(`¡ALTO! Stock insuficiente para procesar entrega de "${prod?.nombre}". Hay: ${stockFisicoAlMomento}, Necesitas: ${item.cantidad}`);
-            }
-        }
-
-        // Snapshot historico: los documentos de SALIDA / DEVOLUCION generados
-        // desde una solicitud no llevan costo unitario propio, asi que se guarda
-        // el `precioref` vigente del producto (si es > 0) en la linea.
-        const prodPrecio = await tx.producto.findUnique({
-          where: { id: item.productoid },
-          select: { precioref: true },
-        });
-        const precioRef = prodPrecio?.precioref;
-        const precioRefNum =
-          precioRef === null || precioRef === undefined ? null : Number(precioRef);
-        const preciorefSnapshot =
-          precioRefNum !== null && Number.isFinite(precioRefNum) && precioRefNum > 0
-            ? new Prisma.Decimal(Math.round((precioRefNum + Number.EPSILON) * 100) / 100)
-            : undefined;
-
-        await tx.documento_item.create({
-          data: {
-            documentoid: documento.id,
-            productoid: item.productoid,
-            unidadid: item.unidadid,
-            cantidad: item.cantidad,
-            loteid: item.loteid,
-            precioref: preciorefSnapshot,
-            notas: item.notas
-          }
-        });
-      }
-
-      // 5. Actualizar Estado Solicitud
-      const solicitudActualizada = await tx.solicitud.update({
-        where: { id },
-        data: {
-          estado: "ENTREGADA",
-          aprobadorid: userId,
-          documentosalidaid: documento.id
-        }
-      });
-
-      return { solicitud: solicitudActualizada, documentoId: documento.id, codigoDoc };
-    });
-
+    const resultado = await solicitudesService.entregarSolicitud(id, usuario.id, usuario.rol);
     res.json(resultado);
-
-  } catch (error: any) {
-    console.error("Error en POST /api/solicitudes/:id/entregar:", error);
-    res.status(400).json({ message: error.message || "Error al procesar la entrega" });
+  } catch (error) {
+    responderError(res, error, "POST /api/solicitudes/:id/entregar");
   }
 });
 
