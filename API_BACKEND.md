@@ -102,7 +102,43 @@ Acceso por rol (`modulo`):
 | GET | `/categorias` | – | Categorías para filtros. | **envuelto** `{ categorias: [...] }` |
 | GET | `/bodegas` | – | Bodegas ordenadas por nombre. | **array plano** `[{ id, nombre }]` |
 | GET | `/pdf` | (filtros) | Reporte de inventario en PDF. | `application/pdf` |
-| GET | `/:id` | – | Detalle de un producto en inventario. | objeto detalle |
+| GET | `/:id` | – | Detalle/kardex de un producto en inventario. | objeto detalle |
+
+`GET /` — cada producto de `productos[]`:
+```ts
+{
+  id: string,
+  nombre: string,
+  codigo: string,
+  detalle: string,             // = producto.ingredienteactivo ("" si vacío)
+  dosis_200lt: number | null,  // dosis por 200 L
+  comentarioDosis: string | null,
+  categoria: string,
+  unidad: string,              // abreviatura
+  stockTotal: string,          // p.ej. "120 L"
+  estadoProducto: "ACTIVO" | "INACTIVO",
+  estadoStock: "Normal" | "Bajo" | "Crítico"   // Crítico ≤50 · Bajo ≤100 · Normal >100
+}
+```
+
+`GET /:id` — detalle (`DetalleProductoDTO`). Si el producto no existe el servicio lanza error y la ruta responde **500** (no 404):
+```ts
+{
+  producto: {
+    id, nombre, codigo, detalle,
+    dosis_200lt: number | null,
+    comentarioDosis: string | null,
+    categoria, unidad, estadoProducto
+  },
+  existenciaTotal: { cantidad: number, unidad: string, texto: string, estadoStock },
+  movimientos: [{                // últimos 100, order by createdat desc
+    id, documentoId,             // = consecutivo o id del documento
+    documentoUuid, tipo,         // "INGRESO" | "SALIDA" | "AJUSTE" | "DEV. PROVEEDOR" | "DEV. INTERNA" | ...
+    cantidadConSigno,            // p.ej. "+12.5" / "-3"
+    unidad, bodega, lote, fecha  // fecha ISO o null
+  }]
+}
+```
 
 ---
 
@@ -120,14 +156,16 @@ Acceso por rol (`modulo`):
 
 | Método | Ruta | Auth | Body / Query | Descripción | Respuesta |
 |---|---|---|---|---|---|
-| POST | `/` | 🔒 | `{ nombre, categoriaid, unidadid, ingredienteactivo?, precioref? }` | Crea producto (código automático). | producto creado (201) |
-| PATCH | `/:id` | 🔒 | `{ nombre?, codigo?, categoriaid?, unidadid?, ingredienteactivo?, precioref?, activo? }` | Edita producto. | producto |
+| POST | `/` | 🔒 | `{ nombre, categoriaid, unidadid, ingredienteactivo?, precioref?, dosis_200lt?, comentarioDosis? }` | Crea producto (código automático). | producto creado (201) |
+| PATCH | `/:id` | 🔒 | `{ nombre?, codigo?, categoriaid?, unidadid?, ingredienteactivo?, precioref?, dosis_200lt?, comentarioDosis?, activo? }` | Edita producto. | producto |
 | GET | `/categorias` | – | – | Categorías. | **array plano** `[{ id, nombre }]` |
 | GET | `/unidades` | – | – | Unidades de medida. | **array plano** `[{ id, nombre, abreviatura }]` |
 | GET | `/productos-busqueda` | – | `q` | Búsqueda de productos (máx 20). | **array plano** `[{ id, nombre, codigo, precioref, unidad, stockActual }]` |
 | GET | `/productos/buscar` | – | `q` | Búsqueda alterna (máx 50, orden alfabético). | **array plano** (producto + `stockActual`) |
 
 > `stockActual` = stock físico **menos** lo comprometido en solicitudes `PENDIENTE`/`APROBADA` (nunca negativo).
+
+> 📌 **Campos de dosis** (opcionales): `dosis_200lt` (número, `Decimal(12,2)`) = dosis recomendada por 200 L; `comentarioDosis` (string) = texto libre. Se aceptan en `POST /` y `PATCH /:id` y se devuelven en el inventario (listado y detalle).
 
 ---
 
