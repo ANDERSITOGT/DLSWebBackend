@@ -2,6 +2,11 @@ import { Router } from "express";
 import prisma from "../../core/prisma";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import "dotenv/config";
+
+if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET es obligatorio en producción");
+}
 
 const router = Router();
 

@@ -127,7 +127,8 @@ PostgreSQL mediante Prisma
 ```bash
 npm run dev    # Desarrollo con recarga automática
 npm run build  # Genera el cliente Prisma y compila TypeScript en dist/
-npm start      # Ejecuta el backend compilado
+npm start      # Ejecuta el backend compilado (no corre migraciones)
+npm run migrate:deploy # prisma migrate deploy: manual o comando de release en Railway
 npx tsc --noEmit # Verifica tipos sin generar archivos
 ```
 

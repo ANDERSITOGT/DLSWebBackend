@@ -1,3 +1,5 @@
+import os from "os";
+import path from "path";
 import type { PrismaClient } from "@prisma/client";
 
 // =============================================================================
@@ -188,6 +190,8 @@ export async function extraerTexto(imagen: Buffer): Promise<ResultadoExtraccion>
   const { recognize } = await import("tesseract.js");
 
   const { data } = await recognize(imagen, IDIOMAS, {
+    // /tmp es el único directorio escribible garantizado en contenedores
+    cachePath: path.join(os.tmpdir(), "tesseract-cache"),
     logger: () => {
       /* silencioso: evitar ruido en logs de producción */
     },

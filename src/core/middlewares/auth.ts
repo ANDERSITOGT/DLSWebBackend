@@ -1,6 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import prisma from '../prisma'; // 👈 Necesitamos importar Prisma aquí
+import 'dotenv/config';
+
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET es obligatorio en producción');
+}
 
 export interface AuthRequest extends Request {
   user?: any;

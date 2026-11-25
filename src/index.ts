@@ -18,16 +18,24 @@ import edicionCriticaRouter from "./modules/admin/edicionCritica";
 import cosechasRouter from "./modules/agricultura/cosechas";
 import dashboardRouter from "./modules/dashboard/dashboard";
 import { authenticateToken } from "./core/middlewares/auth";
+import prisma from "./core/prisma";
 
 dotenv.config();
 
 const app = express();
 // Railway asignará un puerto dinámico en la variable PORT, si no existe usa 3001
-const PORT = process.env.PORT || 3001;
+const PORT = Number(process.env.PORT) || 3001;
+const HOST = "0.0.0.0";
 
 // Middlewares
-// IMPORTANTE: Cuando subamos el frontend, cambiaremos el '*' por la URL real de tu frontend
-app.use(cors()); 
+const corsOrigin = process.env.CORS_ORIGIN;
+app.use(
+  cors(
+    corsOrigin
+      ? { origin: corsOrigin.split(",").map((o) => o.trim()).filter(Boolean) }
+      : undefined
+  )
+);
 app.use(express.json());
 
 // Rutas API
@@ -50,13 +58,32 @@ app.use("/api/edicion-critica", edicionCriticaRouter);
 // Health check (Útil para que Railway sepa que tu app vive)
 app.get("/api/health", async (_req, res) => {
   try {
+    await prisma.$queryRaw`SELECT 1`;
     res.json({ ok: true, db: "online", server: "ready" });
   } catch (error) {
     console.error("Error en /api/health:", error);
-    res.status(500).json({ ok: false });
+    res.status(503).json({ ok: false, db: "offline" });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor backend corriendo en puerto ${PORT}`);
+const server = app.listen(PORT, HOST, () => {
+  console.log(`🚀 Servidor backend corriendo en ${HOST}:${PORT}`);
 });
+
+let cerrando = false;
+async function apagar(signal: string) {
+  if (cerrando) return;
+  cerrando = true;
+  console.log(`${signal} recibido, cerrando servidor...`);
+  const forzar = setTimeout(() => process.exit(1), 10000);
+  forzar.unref();
+  server.close(async () => {
+    try {
+      await prisma.$disconnect();
+    } finally {
+      process.exit(0);
+    }
+  });
+}
+process.on("SIGTERM", () => void apagar("SIGTERM"));
+process.on("SIGINT", () => void apagar("SIGINT"));
