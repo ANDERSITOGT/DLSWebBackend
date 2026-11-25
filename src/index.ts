@@ -3,57 +3,87 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 
-import inicioRouter from "./routes/inicio";
-import inventarioRouter from "./routes/inventario";
-import categoriasRouter from "./routes/categorias";
-import solicitudesRouter from "./routes/solicitudes";
-import authRouter from "./routes/auth";
-import movimientosRouter from "./routes/movimientos"; 
-import catalogosRouter from "./routes/catalogos";
-import usuariosRoutes from "./routes/usuarios";
-import productosRoutes from "./routes/productos";
-import proveedoresRouter from "./routes/proveedores";
-import lotesRouter from "./routes/historialLotes";
-import fincasRouter from "./routes/fincas";
-import edicionCriticaRouter from "./routes/edicionCritica";
+import inicioRouter from "./modules/dashboard/inicio";
+import inventarioRouter from "./modules/inventario/inventario";
+import categoriasRouter from "./modules/inventario/categorias";
+import solicitudesRouter from "./modules/solicitudes/solicitudes";
+import authRouter from "./modules/auth/auth";
+import movimientosRouter from "./modules/movimientos/movimientos";
+import usuariosRoutes from "./modules/usuarios/usuarios";
+import productosRoutes from "./modules/inventario/productos";
+import proveedoresRouter from "./modules/catalogos/proveedores";
+import lotesRouter from "./modules/agricultura/historialLotes";
+import fincasRouter from "./modules/agricultura/fincas";
+import edicionCriticaRouter from "./modules/admin/edicionCritica";
+import cosechasRouter from "./modules/agricultura/cosechas";
+import dashboardRouter from "./modules/dashboard/dashboard";
+import { authenticateToken } from "./core/middlewares/auth";
+import prisma from "./core/prisma";
 
 dotenv.config();
 
 const app = express();
 // Railway asignará un puerto dinámico en la variable PORT, si no existe usa 3001
-const PORT = process.env.PORT || 3001;
+const PORT = Number(process.env.PORT) || 3001;
+const HOST = "0.0.0.0";
 
 // Middlewares
-// IMPORTANTE: Cuando subamos el frontend, cambiaremos el '*' por la URL real de tu frontend
-app.use(cors()); 
+const corsOrigin = process.env.CORS_ORIGIN;
+app.use(
+  cors(
+    corsOrigin
+      ? { origin: corsOrigin.split(",").map((o) => o.trim()).filter(Boolean) }
+      : undefined
+  )
+);
 app.use(express.json());
 
 // Rutas API
-app.use("/api/inicio", inicioRouter);
+app.use("/api/dashboard", dashboardRouter);
+app.use("/api/inicio", authenticateToken, inicioRouter);
 app.use("/api/auth", authRouter);
-app.use("/api/inventario", inventarioRouter);
+app.use("/api/inventario", authenticateToken, inventarioRouter);
 app.use("/api/categorias", categoriasRouter);
 app.use("/api/solicitudes", solicitudesRouter);
 app.use("/api/movimientos", movimientosRouter);
-app.use("/api/catalogos", catalogosRouter);
 app.use("/api/usuarios", usuariosRoutes);
 app.use("/api/productos", productosRoutes);
 app.use("/api/proveedores", proveedoresRouter);
 app.use("/api/lotes", lotesRouter);
 app.use("/api/fincas", fincasRouter);
+app.use("/api/cosechas", cosechasRouter);
 app.use("/api/edicion-critica", edicionCriticaRouter);
 
 
 // Health check (Útil para que Railway sepa que tu app vive)
 app.get("/api/health", async (_req, res) => {
   try {
+    await prisma.$queryRaw`SELECT 1`;
     res.json({ ok: true, db: "online", server: "ready" });
   } catch (error) {
     console.error("Error en /api/health:", error);
-    res.status(500).json({ ok: false });
+    res.status(503).json({ ok: false, db: "offline" });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor backend corriendo en puerto ${PORT}`);
+const server = app.listen(PORT, HOST, () => {
+  console.log(`🚀 Servidor backend corriendo en ${HOST}:${PORT}`);
 });
+
+let cerrando = false;
+async function apagar(signal: string) {
+  if (cerrando) return;
+  cerrando = true;
+  console.log(`${signal} recibido, cerrando servidor...`);
+  const forzar = setTimeout(() => process.exit(1), 10000);
+  forzar.unref();
+  server.close(async () => {
+    try {
+      await prisma.$disconnect();
+    } finally {
+      process.exit(0);
+    }
+  });
+}
+process.on("SIGTERM", () => void apagar("SIGTERM"));
+process.on("SIGINT", () => void apagar("SIGINT"));

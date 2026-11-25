@@ -54,7 +54,6 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Sistema operativo y editores
 .DS_Store
 Thumbs.db
 ehthumbs.db
