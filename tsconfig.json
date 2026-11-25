@@ -6,8 +6,8 @@
 
     // ---- Módulos / entorno Node ----
     "target": "ES2020",
-    "module": "CommonJS",
-    "moduleResolution": "node",
+    "module": "Node16",
+    "moduleResolution": "Node16",
 
     // Para que los imports tipo ES funcionen bien:
     "esModuleInterop": true,
