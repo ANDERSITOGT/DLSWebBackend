@@ -1,4 +1,5 @@
 import prisma from "../../core/prisma";
+import { parsearFechaNegocio } from "../../core/tiempo";
 
 export type BoletaCosechaInput = {
   empacadoraId: string;
@@ -38,10 +39,12 @@ export const cosechasService = {
     const boletas = obtenerBoletas(data);
 
     return prisma.$transaction(async (tx) => {
-      return tx.cosecha.create({
+            return tx.cosecha.create({
         data: {
           loteid: data.loteId,
-          fecha: new Date(data.fecha),
+          // Fecha pura de calendario: se fija a mediodía GT para que el
+          // dashboard de cosechas la agrupe en el día correcto.
+          fecha: parsearFechaNegocio(data.fecha, false),
           libras_campo: data.libras_campo,
           libras_rechazo: data.libras_rechazo ?? null,
           libras_vendidas: data.libras_vendidas ?? null,
@@ -53,7 +56,7 @@ export const cosechasService = {
                   empacadoraid: boleta.empacadoraId,
                   numero_boleta: boleta.numero_boleta ?? null,
                   libras: boleta.libras,
-                  fecha_envio: new Date(boleta.fecha_envio ?? data.fecha),
+                  fecha_envio: parsearFechaNegocio(boleta.fecha_envio ?? data.fecha, false),
                 })),
               }
             : undefined,

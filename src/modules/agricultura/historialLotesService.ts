@@ -1,9 +1,76 @@
 import prisma from "../../core/prisma";
 import PDFDocument from "pdfkit";
+import type { Prisma } from "@prisma/client";
 import {
   ESTADO_DOCUMENTO_APROBADO,
+  TIPO_DOCUMENTO_AJUSTE,
+  TIPO_DOCUMENTO_DEVOLUCION,
   TIPO_DOCUMENTO_SALIDA,
 } from "../../core/constants";
+import { formatearFechaGT } from "../../core/tiempo";
+
+// ==========================================
+// Gasto Neto por Lote
+// ==========================================
+
+/**
+ * Filtro de líneas que afectan el gasto del lote: movimientos **aprobados**
+ * vinculados al lote, de tipo SALIDA, AJUSTE o DEVOLUCION (interna o a
+ * proveedor).
+ */
+export const WHERE_GASTO_LOTE: Prisma.documento_itemWhereInput = {
+  documento: {
+    estado: ESTADO_DOCUMENTO_APROBADO,
+    tipo: { in: [TIPO_DOCUMENTO_SALIDA, TIPO_DOCUMENTO_AJUSTE, TIPO_DOCUMENTO_DEVOLUCION] },
+  },
+};
+
+/**
+ * Calcula el **gasto neto** de un lote a partir de las líneas que lo afectan:
+ *
+ *   gastoNeto = Σ(SALIDA: cantidad * costounit)
+ *             + Σ(AJUSTE: cantidad * costounit)
+ *             + Σ(DEVOLUCION interna: cantidad * costounit)
+ *             + Σ(DEVOLUCION a proveedor: cantidad * costounit)
+ *
+ * Signos:
+ *  - SALIDA: consume insumos del lote -> suma gasto (+).
+ *  - AJUSTE de merma/faltante: se guarda con `cantidad` **negativa**, por lo
+ *    que `cantidad * costounit` es negativo -> **restarlo** suma su costo al
+ *    gasto. Un ajuste de sobrante (cantidad positiva) lo descuenta.
+  *  - DEVOLUCION interna: devuelve insumos del lote -> resta gasto (−), es
+ *    decir, `−(cantidad * costounit)`.
+ *  - DEVOLUCION a proveedor: `cantidad` positiva y sale del lote -> resta
+ *    gasto (−).
+ */
+function calcularGastoNeto(
+  items: Array<{ cantidad: any; costounit: any; tipoDocumento: string; esDevolucionProveedor: boolean }>
+): number {
+  let total = 0;
+  for (const it of items) {
+    const cantidad = Number(it.cantidad || 0);
+    const costo = Number(it.costounit || 0);
+    if (!Number.isFinite(cantidad) || !Number.isFinite(costo)) continue;
+    const valor = cantidad * costo;
+
+    if (it.tipoDocumento === TIPO_DOCUMENTO_SALIDA) {
+      total += valor;
+    } else if (it.tipoDocumento === TIPO_DOCUMENTO_AJUSTE) {
+      // Ajuste ya viene firmado: merma (negativa) suma gasto, sobrante lo resta.
+      total -= valor;
+    } else if (it.tipoDocumento === TIPO_DOCUMENTO_DEVOLUCION) {
+      if (it.esDevolucionProveedor) {
+        // Sale del lote hacia el proveedor: resta gasto.
+        total -= Math.abs(valor);
+      } else {
+        // Devolución interna: regresa al inventario, resta gasto.
+        total -= Math.abs(valor);
+      }
+    }
+  }
+  return total;
+}
+
 
 // ==========================================
 // Tipos de Datos (DTOs)
@@ -58,19 +125,23 @@ export const lotesService = {
       whereClause.encargados = { some: { usuarioid: usuario.id } };
     }
 
-    const lotesRaw = await prisma.lote.findMany({
+        const lotesRaw = await prisma.lote.findMany({
       where: whereClause,
       include: {
         finca: true,
         cultivo: true,
         encargados: { include: { usuario: true } },
         documento_item: {
-          where: { documento: { tipo: TIPO_DOCUMENTO_SALIDA, estado: ESTADO_DOCUMENTO_APROBADO } },
-          // 👈 IMPORTANTE: Traemos documentoid para contar únicos
-          select: { cantidad: true, costounit: true, documentoid: true } 
-        }
+          where: WHERE_GASTO_LOTE,
+          select: {
+            cantidad: true,
+            costounit: true,
+            documentoid: true,
+            documento: { select: { tipo: true, proveedorid: true } },
+          },
+        },
       },
-      orderBy: { codigo: "asc" }
+      orderBy: { codigo: "asc" },
     });
 
     const agrupado: Record<string, FincaGroupDTO> = {};
@@ -87,12 +158,15 @@ export const lotesService = {
         };
       }
 
-      // 1. Calcular Costo
-      const costoTotal = lote.documento_item.reduce((acc, item) => {
-        const cant = Number(item.cantidad || 0);
-        const costo = Number(item.costounit || 0);
-        return acc + (cant * costo);
-      }, 0);
+            // 1. Calcular Gasto Neto (ver `calcularGastoNeto`)
+      const costoTotal = calcularGastoNeto(
+        lote.documento_item.map((item) => ({
+          cantidad: item.cantidad,
+          costounit: item.costounit,
+          tipoDocumento: item.documento?.tipo ?? "",
+          esDevolucionProveedor: !!item.documento?.proveedorid,
+        }))
+      );
 
       // 2. Calcular Conteo de Aplicaciones (Documentos Únicos) 👈 NUEVO
       // Usamos un Set para contar IDs de documentos únicos, no items individuales
@@ -148,28 +222,33 @@ export const lotesService = {
 
     if (!lote) throw new Error("Lote no encontrado");
 
-    const salidas = await prisma.documento_item.findMany({
-      where: {
-        loteid: loteId,
-        documento: { tipo: TIPO_DOCUMENTO_SALIDA, estado: ESTADO_DOCUMENTO_APROBADO }
-      },
+        // Historial de movimientos del lote (SALIDA, AJUSTE y DEVOLUCION aprobados).
+    const movimientos = await prisma.documento_item.findMany({
+      where: { loteid: loteId, ...WHERE_GASTO_LOTE },
       include: {
         documento: true,
-        producto: { include: { unidad: true } }
+        producto: { include: { unidad: true } },
       },
-      orderBy: { documento: { fecha: "desc" } }
+      orderBy: { documento: { fecha: "desc" } },
     });
 
-    let costoTotalAcumulado = 0;
-    // Set para contar aplicaciones en el detalle también
-    const uniqueDocs = new Set();
+    // Gasto neto real del lote (misma fórmula que el dashboard).
+    const costoTotalAcumulado = calcularGastoNeto(
+      movimientos.map((item) => ({
+        cantidad: item.cantidad,
+        costounit: item.costounit,
+        tipoDocumento: item.documento?.tipo ?? "",
+        esDevolucionProveedor: !!item.documento?.proveedorid,
+      }))
+    );
+    // Set para contar aplicaciones (documentos únicos)
+    const uniqueDocs = new Set<string>();
 
-    const historial: AplicacionHistorialDTO[] = salidas.map((item) => {
+    const historial: AplicacionHistorialDTO[] = movimientos.map((item) => {
       const cantidad = Number(item.cantidad);
       const costoUnit = Number(item.costounit || 0);
       const costoAplicacion = cantidad * costoUnit;
 
-      costoTotalAcumulado += costoAplicacion;
       uniqueDocs.add(item.documentoid);
 
       return {
@@ -181,7 +260,7 @@ export const lotesService = {
         producto: item.producto.nombre,
         cantidad: cantidad,
         unidad: item.producto.unidad.abreviatura,
-        costoEstimado: costoAplicacion
+        costoEstimado: costoAplicacion,
       };
     });
 
@@ -224,9 +303,9 @@ export const lotesService = {
       doc.fontSize(10);
       doc.text(`Finca: ${data.info.finca}`);
       doc.text(`Cultivo: ${data.info.cultivo}`);
-      // Agregar fecha de siembra al PDF si existe
+            // Agregar fecha de siembra al PDF si existe (hora Guatemala)
       if(data.info.fechaSiembra) {
-         doc.text(`Fecha Siembra: ${data.info.fechaSiembra.toLocaleDateString()}`);
+         doc.text(`Fecha Siembra: ${formatearFechaGT(data.info.fechaSiembra)}`);
       }
       doc.text(`Costo Total Invertido: Q${data.info.costoTotal.toFixed(2)}`);
       doc.moveDown();
@@ -240,7 +319,7 @@ export const lotesService = {
       doc.font("Helvetica");
 
       data.historial.forEach((h) => {
-        const fecha = h.fecha ? h.fecha.toLocaleDateString() : "-";
+        const fecha = h.fecha ? formatearFechaGT(h.fecha) : "-";
         const y = doc.y;
         doc.text(fecha, 40, y, { width: 80 });
         doc.text(h.producto, 120, y, { width: 200 });

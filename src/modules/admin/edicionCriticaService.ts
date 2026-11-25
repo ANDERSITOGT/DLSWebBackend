@@ -1,4 +1,12 @@
 import prisma from "../../core/prisma";
+import {
+  parsearFechaNegocioOpcional,
+  inicioDelDiaGT,
+  finDelDiaGT,
+} from "../../core/tiempo";
+
+/** Tipos de `Prisma` que se pueden actualizar en una edición crítica. */
+type CambiosDocumento = Record<string, unknown>;
 
 // ===============================
 // Tipos
@@ -86,11 +94,16 @@ export const edicionCriticaService = {
     if (filtros.tipo) {
       whereDocumento.tipo = filtros.tipo;
     }
-    if (filtros.fechaInicio && filtros.fechaFin) {
-      whereDocumento.fecha = {
-        gte: new Date(filtros.fechaInicio),
-        lte: new Date(filtros.fechaFin),
-      };
+        // Fechas en hora Guatemala: `fechaInicio` arranca a las 00:00:00.000 GT y
+    // `fechaFin` se expande hasta el último instante de ese día en GT.
+    // Se permite filtrar solo `fechaInicio`, solo `fechaFin` o ambas.
+    const inicio = parsearFechaNegocioOpcional(filtros.fechaInicio, false);
+    const fin = parsearFechaNegocioOpcional(filtros.fechaFin, false);
+    if (inicio || fin) {
+      const filtroFecha: { gte?: Date; lte?: Date } = {};
+      if (inicio) filtroFecha.gte = inicioDelDiaGT(inicio);
+      if (fin) filtroFecha.lte = finDelDiaGT(fin);
+      whereDocumento.fecha = filtroFecha;
     }
 
     const whereItems: any = {};
@@ -159,20 +172,31 @@ export const edicionCriticaService = {
 
       if (!estadoAnterior) throw new Error("Documento no encontrado");
 
-      // 2. Aplicar cambios al Documento (Cabecera)
+            // 2. Aplicar cambios al Documento (Cabecera)
       if (cambios.documento && Object.keys(cambios.documento).length > 0) {
         
         // Clonamos los datos para no mutar el objeto original directamente
-        const dataActualizar = { ...cambios.documento };
+        const dataActualizar: CambiosDocumento = { ...cambios.documento };
 
-        // Sincronizamos la fecha de creación con la nueva fecha asignada
-        if (dataActualizar.fecha) {
-            dataActualizar.createdat = dataActualizar.fecha;
+        // ⚠️ NUNCA se sobrescribe `createdat`: es el timestamp real de creación
+        // y lo usan la auditoría, el kardex y la resolución de costos
+        // (`resolverCostoDespacho` ordena por `createdat desc`). Si el cliente
+        // lo envía, se descarta.
+        delete dataActualizar.createdat;
+
+        // La fecha del documento se interpreta en hora Guatemala. Con
+        // `conservarHoraActual = false` se fija a mediodía GT, de modo que un
+        // `YYYY-MM-DD` no retroceda de día ni falsee el orden cronológico.
+        if (dataActualizar.fecha !== undefined && dataActualizar.fecha !== null && dataActualizar.fecha !== "") {
+          dataActualizar.fecha = parsearFechaNegocioOpcional(
+            dataActualizar.fecha as string | Date,
+            false
+          );
         }
 
         await tx.documento.update({
           where: { id: documentoId },
-          data: dataActualizar
+          data: dataActualizar as any
         });
       }
 

@@ -1,11 +1,8 @@
 import prisma from "../../core/prisma";
 import {
-  ESTADO_DOCUMENTO_APROBADO,
-  TIPO_DOCUMENTO_AJUSTE,
-  TIPO_DOCUMENTO_DEVOLUCION,
-  TIPO_DOCUMENTO_INGRESO,
-  TIPO_DOCUMENTO_SALIDA,
-} from "../../core/constants";
+  stockFisicoPorProducto,
+  tipoDocumentoSuma,
+} from "../../core/valuacion";
 
 // ===============================
 // Tipos
@@ -119,43 +116,13 @@ export const inventarioService = {
       },
     });
 
-    if (productos.length === 0) return [];
+        if (productos.length === 0) return [];
 
-    // D. Cálculo de Stock (Solo para los productos recuperados)
-    const productIds = productos.map(p => p.id);
-
-    const items = await prisma.documento_item.findMany({
-      where: {
-          productoid: { in: productIds }, // Optimización vital
-          documento: { estado: ESTADO_DOCUMENTO_APROBADO }
-      },
-      select: {
-          productoid: true,
-          cantidad: true,
-          documento: { select: { tipo: true, proveedorid: true } }
-      }
-    });
-
-    // Sumar en memoria
-    const existencias: Record<string, number> = {};
-
-    for (const item of items) {
-      const doc = item.documento;
-      if (!doc) continue;
-      const qty = numeroDesdeDecimal(item.cantidad);
-      let signo = 0;
-
-      if (doc.tipo === TIPO_DOCUMENTO_INGRESO) signo = 1;
-      else if (doc.tipo === TIPO_DOCUMENTO_SALIDA) signo = -1;
-      else if (doc.tipo === TIPO_DOCUMENTO_AJUSTE) signo = 1;
-      else if (doc.tipo === TIPO_DOCUMENTO_DEVOLUCION) signo = doc.proveedorid ? -1 : 1;
-
-      if (signo !== 0) {
-        const key = item.productoid;
-        if (!existencias[key]) existencias[key] = 0;
-        existencias[key] += signo * qty;
-      }
-    }
+    // D. Cálculo de Stock (una sola consulta `groupBy` para todos los productos)
+    const existencias = await stockFisicoPorProducto(
+      prisma,
+      productos.map((p) => p.id)
+    );
 
     // E. Construir respuesta
     return productos.map((p) => {
@@ -187,12 +154,9 @@ export const inventarioService = {
 
     if (!producto) throw new Error("Producto no encontrado");
 
-    // Historial para visualización (últimos 100)
+        // Historial para visualización (últimos 100)
     const movimientosRaw = await prisma.documento_item.findMany({
-      where: {
-          productoid: productoId,
-          documento: { estado: ESTADO_DOCUMENTO_APROBADO }
-      },
+      where: { productoid: productoId },
       include: {
         documento: true,
         unidad: true,
@@ -206,41 +170,21 @@ export const inventarioService = {
     const bodegasMap = new Map<string, string>();
     for (const b of bodegas) bodegasMap.set(b.id, b.nombre);
 
-    // Cálculo total histórico exacto
-    const allItems = await prisma.documento_item.findMany({
-        where: { productoid: productoId, documento: { estado: ESTADO_DOCUMENTO_APROBADO } },
-        select: { cantidad: true, documento: { select: { tipo: true, proveedorid: true } } }
-    });
-
-    let existenciaTotalCalculada = 0;
-    for (const it of allItems) {
-        const q = numeroDesdeDecimal(it.cantidad);
-        let s = 0;
-        if (it.documento.tipo === TIPO_DOCUMENTO_INGRESO) s = 1;
-        else if (it.documento.tipo === TIPO_DOCUMENTO_SALIDA) s = -1;
-        else if (it.documento.tipo === TIPO_DOCUMENTO_AJUSTE) s = 1;
-        else if (it.documento.tipo === TIPO_DOCUMENTO_DEVOLUCION) s = it.documento.proveedorid ? -1 : 1;
-
-        existenciaTotalCalculada += (s * q);
-    }
+        // Cálculo total histórico exacto (misma fórmula que el módulo de valuación)
+    const existenciaTotalCalculada = (await stockFisicoPorProducto(prisma, [productoId]))[productoId] ?? 0;
 
     const movimientos: MovimientoDetalleDTO[] = movimientosRaw.map((item) => {
       const doc = item.documento;
       if (!doc) return null as any;
 
       const qty = numeroDesdeDecimal(item.cantidad);
-      let signo = 0;
+      // Signo comun (constante unica en `tipoDocumentoSuma`): un AJUSTE llega con
+      // cantidad ya firmada y simplemente se aplica con signo +.
+      const signo = tipoDocumentoSuma(doc.tipo, doc.proveedorid ?? null);
       let tipoTexto = doc.tipo as string;
 
-      switch (doc.tipo) {
-        case TIPO_DOCUMENTO_INGRESO: signo = 1; break;
-        case TIPO_DOCUMENTO_SALIDA: signo = -1; break;
-        case TIPO_DOCUMENTO_AJUSTE: signo = 1; break;
-        case TIPO_DOCUMENTO_DEVOLUCION:
-          if (doc.proveedorid) { signo = -1; tipoTexto = "DEV. PROVEEDOR"; }
-          else { signo = 1; tipoTexto = "DEV. INTERNA"; }
-          break;
-        default: signo = 0;
+      if (doc.tipo === "DEVOLUCION") {
+        tipoTexto = doc.proveedorid ? "DEV. PROVEEDOR" : "DEV. INTERNA";
       }
 
       const finalQty = signo * qty;

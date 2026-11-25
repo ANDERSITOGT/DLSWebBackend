@@ -14,6 +14,15 @@ import {
   TIPO_SOLICITUD_DESPACHO,
   TIPO_SOLICITUD_DEVOLUCION,
 } from "../../core/constants";
+import {
+  aNumero as aNumeroCompartido,
+  calcularCpp,
+  normalizarCosto as normalizarCostoCompartido,
+  normalizarPrecioref as normalizarPreciorefCompartido,
+  redondear as redondearCompartido,
+  stockFisicoPorProducto,
+} from "../../core/valuacion";
+import { anioActualGT, formatearFechaHoraGT, parsearFechaNegocio, parsearFechaNegocioOpcional } from "../../core/tiempo";
 
 // ===================================================
 // ERRORES DE DOMINIO
@@ -81,7 +90,8 @@ export type SolicitudesPaginacion = { page: number; limit: number };
 export type SolicitudResumenDTO = {
   id: string;
   codigo: string;
-  fecha: Date | null;
+  /** ISO 8601 en UTC (consistente con el resto de la API). */
+  fecha: string | null;
   estado: EstadoSolicitud;
   tipo: TipoSolicitud;
   bodegaNombre: string;
@@ -124,7 +134,8 @@ export type SolicitudHistorialDTO = {
 export type SolicitudDetalleDTO = {
   id: string;
   codigo: string;
-  fecha: Date | null;
+  /** ISO 8601 en UTC (consistente con el resto de la API). */
+  fecha: string | null;
   estado: EstadoSolicitud;
   tipo: TipoSolicitud;
   solicitante: { id: string; nombre: string };
@@ -203,51 +214,25 @@ export function puedeVerCostos(rol?: string | null): boolean {
 }
 
 /** `producto.precioref` es `Decimal(12, 2)`. */
-const PRECIOREF_DECIMALES = 2;
-const PRECIOREF_MAX_ENTERO = 10 ** (12 - PRECIOREF_DECIMALES);
+export const PRECIOREF_DECIMALES = 2;
+export const PRECIOREF_MAX_ENTERO = 10 ** (12 - PRECIOREF_DECIMALES);
 
 /** `documento_item.costounit` es `Decimal(12, 4)`. */
-const COSTOUNIT_DECIMALES = 4;
-const COSTOUNIT_MAX_ENTERO = 10 ** (12 - COSTOUNIT_DECIMALES);
+export const COSTOUNIT_DECIMALES = 4;
+export const COSTOUNIT_MAX_ENTERO = 10 ** (12 - COSTOUNIT_DECIMALES);
 
 // ===================================================
 // HELPERS NUMÉRICOS
 // ===================================================
+//
+// Todos delegan en `src/core/valuacion.ts` para tener una única fuente de
+// verdad de redondeo/precisión en todo el sistema.
+//
 /** Redondea a `dec` decimales evitando artefactos de punto flotante. */
-function redondear(n: number, dec = 2): number {
-  const f = 10 ** dec;
-  return Math.round((n + Number.EPSILON) * f) / f;
-}
+const redondear = redondearCompartido;
 
-/**
- * Convierte a número aceptando "1,5" (coma decimal) además de "1.5".
- *
- * Prisma devuelve las columnas `Decimal` como objetos (`Prisma.Decimal`),
- * no como `number`; sin el caso de objeto cualquier importe leído de BD se
- * interpretaría como `null`.
- */
-export function aNumero(value: unknown): number | null {
-  if (value === undefined || value === null || value === "") return null;
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string") {
-    const limpio = value.trim().replace(",", ".");
-    if (limpio === "") return null;
-    const n = Number(limpio);
-    return Number.isFinite(n) ? n : null;
-  }
-  if (typeof value === "object") {
-    const obj = value as { toNumber?: () => number; toString?: () => string };
-    if (typeof obj.toNumber === "function") {
-      const n = obj.toNumber();
-      return Number.isFinite(n) ? n : null;
-    }
-    if (typeof obj.toString === "function") {
-      const n = Number(obj.toString());
-      return Number.isFinite(n) ? n : null;
-    }
-  }
-  return null;
-}
+/** Convierte a número (acepta coma decimal y `Prisma.Decimal`). */
+export const aNumero = aNumeroCompartido;
 
 /** Recorta un string de query/body; devuelve `null` si queda vacío. */
 export function textoOpcional(value: unknown): string | null {
@@ -258,15 +243,10 @@ export function textoOpcional(value: unknown): string | null {
 
 /**
  * Normaliza un importe a la precisión de `documento_item.costounit`
- * (`Decimal(12, 4)`). Devuelve `null` si no es un número finito positivo o
- * si no cabe en la columna (para no romper el INSERT).
+ * (`Decimal(12, 4)`). Devuelve `null` si no es un número finito positivo.
  */
 export function normalizarCosto(value: unknown): number | null {
-  const n = aNumero(value);
-  if (n === null || !Number.isFinite(n) || n <= 0) return null;
-  const r = redondear(n, COSTOUNIT_DECIMALES);
-  if (r >= COSTOUNIT_MAX_ENTERO) return null;
-  return r;
+  return normalizarCostoCompartido(value);
 }
 
 /**
@@ -274,11 +254,7 @@ export function normalizarCosto(value: unknown): number | null {
  * (`Decimal(12, 2)`). Devuelve `null` si no es un número finito positivo.
  */
 export function normalizarPrecioref(value: unknown): number | null {
-  const n = aNumero(value);
-  if (n === null || !Number.isFinite(n) || n <= 0) return null;
-  const r = redondear(n, PRECIOREF_DECIMALES);
-  if (r >= PRECIOREF_MAX_ENTERO) return null;
-  return r;
+  return normalizarPreciorefCompartido(value);
 }
 
 /**
@@ -500,7 +476,7 @@ async function getSolicitudes(opciones: {
   const data: SolicitudResumenDTO[] = solicitudes.map((s) => ({
     id: s.id,
     codigo: s.id,
-    fecha: s.fecha,
+    fecha: s.fecha ? s.fecha.toISOString() : null,
     estado: (s.estado ?? SOLICITUD_PENDIENTE) as EstadoSolicitud,
     tipo: (s.tipo ?? TIPO_SOLICITUD_DESPACHO) as TipoSolicitud,
     bodegaNombre: s.bodega?.nombre ?? "Sin Bodega",
@@ -633,7 +609,7 @@ async function getDetalleSolicitud(
   return {
     id: solicitud.id,
     codigo: solicitud.id,
-    fecha: solicitud.fecha,
+    fecha: solicitud.fecha ? solicitud.fecha.toISOString() : null,
     estado: (solicitud.estado ?? SOLICITUD_PENDIENTE) as EstadoSolicitud,
     tipo: (solicitud.tipo ?? TIPO_SOLICITUD_DESPACHO) as TipoSolicitud,
     solicitante: {
@@ -826,7 +802,7 @@ async function crearSolicitud(
     }
 
     // C. Generar Consecutivo (SOL-2026-XXXX)
-    const anioActual = new Date().getFullYear();
+    const anioActual = anioActualGT();
     let correlativo = 1;
     const contador = await tx.consecutivo.findUnique({
       where: { tipo_anio: { tipo: "SOLICITUD", anio: anioActual } },
@@ -849,7 +825,9 @@ async function crearSolicitud(
     const nueva = await tx.solicitud.create({
       data: {
         id: codigo,
-        fecha: fecha ? new Date(fecha) : new Date(),
+        // Fecha en hora Guatemala: una fecha solo-día conserva la hora actual de
+        // GT para no retroceder al día anterior.
+        fecha: parsearFechaNegocio(fecha, true),
         estado: SOLICITUD_PENDIENTE,
         tipo,
         solicitanteid: finalSolicitanteId,
@@ -1156,7 +1134,7 @@ async function entregarSolicitud(
       }
 
       // Consecutivo del documento.
-      const anioActual = new Date().getFullYear();
+      const anioActual = anioActualGT();
       let correlativo = 1;
       const contador = await tx.consecutivo.findUnique({
         where: { tipo_anio: { tipo: tipoDocumento, anio: anioActual } },
@@ -1214,6 +1192,24 @@ async function entregarSolicitud(
         origen: string;
       }> = [];
 
+      // CPP de las devoluciones internas: stock y CPP antes de insertar las
+      // nuevas líneas (se leen una sola vez para todos los productos).
+      const idsProductos = [...new Set(solicitud.solicitud_item.map((i) => i.productoid))];
+      const stockPrevioPorProducto = esDespacho
+        ? {}
+        : await stockFisicoPorProducto(tx, idsProductos);
+      const productosConCpp = esDespacho
+        ? []
+        : await tx.producto.findMany({
+            where: { id: { in: idsProductos } },
+            select: { id: true, precioref: true },
+          });
+      const cppActualPorProducto = new Map(
+        productosConCpp.map((p) => [p.id, aNumeroCompartido(p.precioref)])
+      );
+      // Acumula las cantidades devueltas por producto para ponderar una sola vez.
+      const cantidadDevueltaPorProducto = new Map<string, { cantidad: number; valor: number }>();
+
       for (const item of solicitud.solicitud_item) {
         const unidadid = item.producto?.unidadid ?? item.unidadid;
 
@@ -1224,6 +1220,15 @@ async function entregarSolicitud(
           const resuelto = await resolverCostoDespacho(tx, item.productoid);
           costo = resuelto.costounit;
           origen = resuelto.origen;
+
+          // 🚫 BLOQUEO ESTRICTO: no se despacha un producto sin costo.
+          if (costo === null) {
+            throw new SolicitudError(
+              `El producto ${item.producto?.nombre ?? item.productoid} no tiene precio de referencia configurado. Asigne un precio en Inventario antes de despachar.`,
+              400,
+              "PRODUCTO_SIN_COSTO"
+            );
+          }
         } else {
           // DEVOLUCIÓN: hereda el costo del documento de salida original.
           const heredado = origenDevolucion.porProducto.get(item.productoid);
@@ -1234,6 +1239,16 @@ async function entregarSolicitud(
             const resuelto = await resolverCostoDespacho(tx, item.productoid);
             costo = resuelto.costounit;
             origen = resuelto.origen;
+          }
+
+          // Acumular para el CPP (cantidad devuelta * costo heredado).
+          const cantidad = aNumeroCompartido(item.cantidad) ?? 0;
+          if (costo !== null && cantidad > 0) {
+            const prev = cantidadDevueltaPorProducto.get(item.productoid) ?? { cantidad: 0, valor: 0 };
+            cantidadDevueltaPorProducto.set(item.productoid, {
+              cantidad: prev.cantidad + cantidad,
+              valor: prev.valor + cantidad * costo,
+            });
           }
         }
 
@@ -1253,6 +1268,31 @@ async function entregarSolicitud(
         });
 
         detalleCostos.push({ productoId: item.productoid, costounit: costo, origen });
+      }
+
+      // ---------------------------------------------------------------
+      // DEVOLUCIÓN INTERNA: ponderar el CPP con la cantidad devuelta.
+      // cppNuevo = ((stockPrevio * cppActual) + (cantDevuelta * costo))
+      //            / (stockPrevio + cantidadDevuelta)
+      // ---------------------------------------------------------------
+      if (!esDespacho) {
+        for (const [productoId, { cantidad, valor }] of cantidadDevueltaPorProducto) {
+          if (cantidad <= 0) continue;
+          const costoPonderadoEntrada = valor / cantidad;
+          const { cppNuevo } = calcularCpp({
+            stockPrevio: stockPrevioPorProducto[productoId] ?? 0,
+            cppActual: cppActualPorProducto.get(productoId) ?? null,
+            cantidadIngreso: cantidad,
+            costounit: costoPonderadoEntrada,
+          });
+          if (cppNuevo === null) continue;
+          const valorDecimal = normalizarPrecioref(cppNuevo);
+          if (valorDecimal === null) continue;
+          await tx.producto.update({
+            where: { id: productoId },
+            data: { precioref: new Prisma.Decimal(valorDecimal) },
+          });
+        }
       }
 
       // Auditoría: ENTREGAR (quien entrega, no quien aprobó).
@@ -1309,7 +1349,9 @@ async function exportSolicitudDetallePDF(
     doc.text(`Código: ${det.id}`);
     doc.text(`Estado: ${det.estado}`);
     doc.text(`Tipo: ${det.tipo}`);
-    doc.text(`Fecha: ${det.fecha ? det.fecha.toISOString() : "-"}`);
+    // `det.fecha` es ISO 8601 en UTC: se re-parsea para formatear en hora GT.
+    const fechaGT = det.fecha ? parsearFechaNegocioOpcional(det.fecha, true) : null;
+    doc.text(`Fecha: ${fechaGT ? formatearFechaHoraGT(fechaGT) : "-"}`);
     doc.text(`Solicitante: ${det.solicitante.nombre}`);
     doc.text(`Aprobador: ${det.aprobador?.nombre ?? "-"}`);
     doc.text(`Bodega: ${det.bodega?.nombre ?? "-"}`);

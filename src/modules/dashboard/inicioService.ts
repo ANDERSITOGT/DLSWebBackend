@@ -9,21 +9,22 @@ import {
   SOLICITUD_PENDIENTE,
   SOLICITUD_RECHAZADA,
 } from "../../core/constants";
+import { inicioDelDiaGT } from "../../core/tiempo";
 
 function inicioDeHoy() {
-  const hoy = new Date();
-  hoy.setHours(0, 0, 0, 0);
-  return hoy;
+  // Medianoche en hora Guatemala, no en la hora del servidor.
+  return inicioDelDiaGT(new Date());
 }
 
 function inicioDeSemanaActual() {
   const hoy = new Date();
-  const inicio = new Date(hoy);
-  // 0 = domingo, queremos lunes como inicio de semana
-  const diff = (inicio.getDay() + 6) % 7;
-  inicio.setDate(inicio.getDate() - diff);
-  inicio.setHours(0, 0, 0, 0);
-  return inicio;
+  const inicio = inicioDeHoy();
+  // Día de la semana en Guatemala (0 = domingo).
+  // Se calcula con la clave de día GT para no depender de la TZ del servidor.
+  const clave = new Date(hoy.getTime() - 6 * 60 * 60 * 1000);
+  const diaSemanaGT = clave.getUTCDay();
+  const diff = (diaSemanaGT + 6) % 7; // lunes como inicio de semana
+  return new Date(inicio.getTime() - diff * 24 * 60 * 60 * 1000);
 }
 
 export const inicioService = {

@@ -14,6 +14,12 @@ import {
   type MovimientoEstado,
 } from "./movimientosService";
 import { extraerTexto, interpretarEscaneo } from "./ocrService";
+import {
+  aNumero as aNumeroValuacion,
+  normalizarPrecioref as normalizarPreciorefValuacion,
+  stockFisicoPorProducto,
+} from "../../core/valuacion";
+import { anioActualGT } from "../../core/tiempo";
 
 const router = Router();
 
@@ -142,22 +148,30 @@ router.post(
 );
 
 // ==========================================
-// Snapshot de `precioref` para salidas / ajustes
+// Costeo snapshot para AJUSTE / DEVOLUCION a proveedor
 // ==========================================
 /**
- * Convierte `producto.precioref` en el valor a guardar como snapshot historico
- * en `documento_item.precioref`.
+ * Resuelve el costo unitario a congelar en una línea que no trae costo propio
+ * (AJUSTE, DEVOLUCION a proveedor).
  *
- * Estas operaciones (SALIDA, AJUSTE, DEVOLUCION a proveedor) no manejan costo
- * unitario propio, por lo que si el precio de referencia del producto no es
- * valido o es 0 se devuelve `undefined` y la columna queda en `null` (no se
- * escribe un 0 enganoso).
+ * Regla: se usa `producto.precioref` (CPP vigente) normalizado a
+ * `Decimal(12,2)`. Si el producto no tiene precio de referencia (> 0), se
+ * responde **400 `PRODUCTO_SIN_COSTO`**, igual que en los despachos.
  */
-function snapshotPrecioref(precioref: unknown): Prisma.Decimal | undefined {
-  if (precioref === null || precioref === undefined) return undefined;
-  const n = Number(precioref);
-  if (!Number.isFinite(n) || n <= 0) return undefined;
-  return new Prisma.Decimal(Math.round((n + Number.EPSILON) * 100) / 100);
+function resolverCostoCongelado(
+  producto: { id: string; nombre: string; precioref: unknown }
+): { costounit: Prisma.Decimal; precioref: Prisma.Decimal } {
+  const cpp = normalizarPreciorefValuacion(producto.precioref);
+  if (cpp === null) {
+    throw new MovimientoError(
+      `El producto ${producto.nombre} no tiene precio de referencia configurado. Asígnelo antes de ajustar.`,
+      400,
+      "PRODUCTO_SIN_COSTO"
+    );
+  }
+  // `documento_item.precioref` es Decimal(12,2) y `costounit` Decimal(12,4):
+  // el mismo valor se congela en ambas columnas.
+  return { costounit: new Prisma.Decimal(cpp), precioref: new Prisma.Decimal(cpp) };
 }
 
 // ==========================================
@@ -208,82 +222,234 @@ router.post("/ingreso", authenticateToken, requireRole("ADMIN", "BODEGUERO"), as
 
 // ==========================================
 // POST /api/movimientos/ajuste
+// Ajuste bidireccional (sobrante / merma) con costeo congelado
 // ==========================================
-router.post("/ajuste", authenticateToken, async (req: AuthRequest, res: Response) => {
-  try {
-    const { productoId, cantidad, notas, tipo } = req.body;
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ message: "No autorizado" });
-    if (!productoId || !cantidad || !notas) return res.status(400).json({ message: "Faltan datos" });
-    const userRole = req.user?.rol;
-    if (userRole !== "ADMIN" && userRole !== "BODEGUERO") return res.status(403).json({ message: "No tienes permisos para realizar ajustes." });
+/** Tipos de ajuste que restan stock (guarda la cantidad en negativo). */
+const TIPOS_AJUSTE_SALIDA = new Set(["SALIDA", "FALTANTE", "MERMA", "NEGATIVO"]);
+/** Tipos de ajuste que suman stock (guarda la cantidad en positivo). */
+const TIPOS_AJUSTE_ENTRADA = new Set(["ENTRADA", "SOBRANTE", "POSITIVO"]);
 
-    const resultado = await prisma.$transaction(async (tx) => {
-        const anioActual = new Date().getFullYear();
-        let nuevoCorrelativo = 1;
-        const contador = await tx.consecutivo.findUnique({ where: { tipo_anio: { tipo: "AJUSTE", anio: anioActual } } });
-        if (contador) {
-             const actualizado = await tx.consecutivo.update({ where: { id: contador.id }, data: { ultimo: { increment: 1 } } });
-             nuevoCorrelativo = actualizado.ultimo || 1;
-        } else {
-             await tx.consecutivo.create({ data: { tipo: "AJUSTE", anio: anioActual, ultimo: 1, prefijo: "AJU" } });
-             nuevoCorrelativo = 1;
+router.post(
+  "/ajuste",
+  authenticateToken,
+  requireRole("ADMIN", "BODEGUERO"),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { productoId, cantidad, tipo, bodegaId, loteId, notas } = req.body ?? {};
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "No autorizado" });
+
+      const productoIdLimpio = texto(productoId);
+      if (!productoIdLimpio) {
+        return res.status(400).json({ message: "El campo 'productoId' es obligatorio.", codigo: "PRODUCTO_ID_REQUERIDO" });
+      }
+
+      const cantidadAbs = Math.abs(aNumeroValuacion(cantidad) ?? NaN);
+      if (!Number.isFinite(cantidadAbs) || cantidadAbs <= 0) {
+        return res.status(400).json({ message: "La 'cantidad' debe ser un número mayor a 0.", codigo: "CANTIDAD_INVALIDA" });
+      }
+
+      const tipoLimpio = (texto(tipo) ?? "AJUSTE").toUpperCase();
+      if (!TIPOS_AJUSTE_SALIDA.has(tipoLimpio) && !TIPOS_AJUSTE_ENTRADA.has(tipoLimpio)) {
+        return res.status(400).json({
+          message: "Tipo de ajuste inválido. Use SALIDA/FALTANTE o ENTRADA/SOBRANTE.",
+          codigo: "TIPO_AJUSTE_INVALIDO",
+        });
+      }
+      const esSalida = TIPOS_AJUSTE_SALIDA.has(tipoLimpio);
+      // Merma/faltante se guarda NEGATIVA para que todos los cálculos de stock
+      // la resten; el sobrante entra positivo.
+      const cantidadFirmada = esSalida ? -cantidadAbs : cantidadAbs;
+
+      const loteIdLimpio = texto(loteId);
+      const bodegaIdLimpio = texto(bodegaId);
+
+      const resultado = await prisma.$transaction(async (tx) => {
+        const prod = await tx.producto.findUnique({ where: { id: productoIdLimpio } });
+        if (!prod) {
+          throw new MovimientoError("Producto no encontrado", 404, "PRODUCTO_NO_ENCONTRADO");
         }
-        const codigoGenerado = `AJU-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
-        const bodegaDefault = await tx.bodega.findFirst();
-        const documento = await tx.documento.create({ data: { tipo: "AJUSTE", estado: "APROBADO", consecutivo: codigoGenerado, fecha: new Date(), creadorid: userId, bodegaorigenid: bodegaDefault?.id, observacion: notas } });
-        const prod = await tx.producto.findUnique({ where: { id: productoId } });
-        if (!prod) throw new Error("Producto no encontrado");
-        // Snapshot historico: los ajustes no traen `costounit`, asi que se guarda
-        // el `precioref` vigente del producto (si es > 0) en la linea.
-        await tx.documento_item.create({ data: { documentoid: documento.id, productoid: productoId, unidadid: prod.unidadid, cantidad: Number(cantidad), precioref: snapshotPrecioref(prod.precioref), notas: `Ajuste manual (${tipo})` } });
+
+        // Costo congelado obligatorio (CPP vigente).
+        const costo = resolverCostoCongelado(prod);
+
+        if (loteIdLimpio) {
+          const lote = await tx.lote.findUnique({ where: { id: loteIdLimpio }, select: { id: true } });
+          if (!lote) throw new MovimientoError("Lote no encontrado", 404, "LOTE_NO_ENCONTRADO");
+        }
+
+        // Validación de stock físico disponible en mermas.
+        if (esSalida) {
+          const stock = (await stockFisicoPorProducto(tx, [productoIdLimpio]))[productoIdLimpio] ?? 0;
+          if (stock < cantidadAbs) {
+            throw new MovimientoError(
+              `Stock insuficiente para la merma. Disponible: ${stock}, solicitado: ${cantidadAbs}.`,
+              400,
+              "STOCK_INSUFICIENTE"
+            );
+          }
+        }
+
+                const anioActual = anioActualGT();
+        let nuevoCorrelativo = 1;
+        const contador = await tx.consecutivo.findUnique({
+          where: { tipo_anio: { tipo: "AJUSTE", anio: anioActual } },
+        });
+        if (contador) {
+          const actualizado = await tx.consecutivo.update({
+            where: { id: contador.id },
+            data: { ultimo: { increment: 1 } },
+          });
+          nuevoCorrelativo = actualizado.ultimo || 1;
+        } else {
+          await tx.consecutivo.create({
+            data: { tipo: "AJUSTE", anio: anioActual, ultimo: 1, prefijo: "AJU" },
+          });
+          nuevoCorrelativo = 1;
+        }
+        const codigoGenerado = `AJU-${anioActual}-${nuevoCorrelativo.toString().padStart(4, "0")}`;
+
+        // Bodega: la indicada, o la primera si no se especifica.
+        let bodega = bodegaIdLimpio
+          ? await tx.bodega.findUnique({ where: { id: bodegaIdLimpio }, select: { id: true } })
+          : null;
+        if (bodegaIdLimpio && !bodega) {
+          throw new MovimientoError("La bodega indicada no existe.", 404, "BODEGA_NO_ENCONTRADA");
+        }
+        if (!bodega) bodega = await tx.bodega.findFirst({ select: { id: true } });
+
+        const documento = await tx.documento.create({
+          data: {
+            tipo: "AJUSTE",
+            estado: "APROBADO",
+            consecutivo: codigoGenerado,
+            fecha: new Date(),
+            creadorid: userId,
+            bodegaorigenid: bodega?.id,
+            observacion: texto(notas) ?? `Ajuste manual (${tipoLimpio})`,
+          },
+        });
+
+        await tx.documento_item.create({
+          data: {
+            documentoid: documento.id,
+            productoid: productoIdLimpio,
+            unidadid: prod.unidadid,
+            cantidad: new Prisma.Decimal(cantidadFirmada),
+            costounit: costo.costounit,
+            precioref: costo.precioref,
+            loteid: loteIdLimpio,
+            notas: texto(notas) ?? `Ajuste manual (${tipoLimpio})`,
+          },
+        });
+
         return documento;
-    });
-    res.json({ ok: true, documento: resultado });
-  } catch (error: any) {
-    console.error("Error al crear ajuste:", error);
-    res.status(500).json({ message: "Error al guardar ajuste", error: error.message });
+      });
+
+      return res.json({ ok: true, documento: resultado });
+    } catch (error: any) {
+      if (responderError(res, error, "POST /api/movimientos/ajuste")) return;
+      console.error("Error al crear ajuste:", error);
+      return res.status(500).json({ message: "Error al guardar ajuste" });
+    }
   }
-});
+);
 
 // ==========================================
 // POST /api/movimientos/devolucion-proveedor
 // ==========================================
-router.post("/devolucion-proveedor", authenticateToken, async (req: AuthRequest, res: Response) => {
+router.post(
+  "/devolucion-proveedor",
+  authenticateToken,
+  requireRole("ADMIN", "BODEGUERO"),
+  async (req: AuthRequest, res: Response) => {
     try {
-      const { proveedorId, bodegaId, items, notas } = req.body;
+      const { proveedorId, bodegaId, items, notas } = req.body ?? {};
       const userId = req.user?.id;
       if (!userId) return res.status(401).json({ message: "No autorizado" });
-      if (!proveedorId || !items || items.length === 0) return res.status(400).json({ message: "Faltan datos" });
-      const userRole = req.user?.rol;
-      if (userRole !== "ADMIN" && userRole !== "BODEGUERO") return res.status(403).json({ message: "No tienes permisos para devolver a proveedores." });
-  
+
+      const proveedorIdLimpio = texto(proveedorId);
+      if (!proveedorIdLimpio || !Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ message: "Se requiere 'proveedorId' e 'items'." });
+      }
+
       const resultado = await prisma.$transaction(async (tx) => {
-          const anioActual = new Date().getFullYear();
-          let nuevoCorrelativo = 1;
-          const contador = await tx.consecutivo.findUnique({ where: { tipo_anio: { tipo: "DEVOLUCION", anio: anioActual } } });
-          if (contador) {
-               const actualizado = await tx.consecutivo.update({ where: { id: contador.id }, data: { ultimo: { increment: 1 } } });
-               nuevoCorrelativo = actualizado.ultimo || 1;
-          } else {
-               await tx.consecutivo.create({ data: { tipo: "DEVOLUCION", anio: anioActual, ultimo: 1, prefijo: "DEV" } });
-               nuevoCorrelativo = 1;
+                const anioActual = anioActualGT();
+        let nuevoCorrelativo = 1;
+        const contador = await tx.consecutivo.findUnique({
+          where: { tipo_anio: { tipo: "DEVOLUCION", anio: anioActual } },
+        });
+        if (contador) {
+          const actualizado = await tx.consecutivo.update({
+            where: { id: contador.id },
+            data: { ultimo: { increment: 1 } },
+          });
+          nuevoCorrelativo = actualizado.ultimo || 1;
+        } else {
+          await tx.consecutivo.create({
+            data: { tipo: "DEVOLUCION", anio: anioActual, ultimo: 1, prefijo: "DEV" },
+          });
+          nuevoCorrelativo = 1;
+        }
+        const codigoGenerado = `DEV-${anioActual}-${nuevoCorrelativo.toString().padStart(4, "0")}`;
+
+        const documento = await tx.documento.create({
+          data: {
+            tipo: "DEVOLUCION",
+            estado: "APROBADO",
+            consecutivo: codigoGenerado,
+            fecha: new Date(),
+            creadorid: userId,
+            bodegaorigenid: texto(bodegaId),
+            proveedorid: proveedorIdLimpio,
+            observacion: texto(notas) || "Devolución a proveedor",
+          },
+        });
+
+        for (const item of items) {
+          const productoIdLimpio = texto(item?.productoId);
+          if (!productoIdLimpio) {
+            throw new MovimientoError("Cada ítem debe incluir 'productoId'.", 400, "PRODUCTO_ID_REQUERIDO");
           }
-          const codigoGenerado = `DEV-${anioActual}-${nuevoCorrelativo.toString().padStart(4, '0')}`;
-          const documento = await tx.documento.create({ data: { tipo: "DEVOLUCION", estado: "APROBADO", consecutivo: codigoGenerado, fecha: new Date(), creadorid: userId, bodegaorigenid: bodegaId, proveedorid: proveedorId, observacion: notas || "Devolución a proveedor" } });
-          for (const item of items) {
-              const prod = await tx.producto.findUnique({ where: { id: item.productoId } });
-              if (!prod) throw new Error("Producto no encontrado");
-              await tx.documento_item.create({ data: { documentoid: documento.id, productoid: item.productoId, unidadid: prod.unidadid, cantidad: Number(item.cantidad), precioref: snapshotPrecioref(prod.precioref), notas: item.notas } });
+          const cantidadAbs = Math.abs(aNumeroValuacion(item?.cantidad) ?? NaN);
+          if (!Number.isFinite(cantidadAbs) || cantidadAbs <= 0) {
+            throw new MovimientoError(
+              `Cantidad inválida para el producto ${productoIdLimpio}.`,
+              400,
+              "CANTIDAD_INVALIDA"
+            );
           }
-          return documento;
+
+          const prod = await tx.producto.findUnique({ where: { id: productoIdLimpio } });
+          if (!prod) throw new MovimientoError("Producto no encontrado", 404, "PRODUCTO_NO_ENCONTRADO");
+
+          // Costo congelado obligatorio (CPP vigente) -> 400 PRODUCTO_SIN_COSTO si no hay.
+          const costo = resolverCostoCongelado(prod);
+
+          await tx.documento_item.create({
+            data: {
+              documentoid: documento.id,
+              productoid: productoIdLimpio,
+              unidadid: prod.unidadid,
+              cantidad: new Prisma.Decimal(cantidadAbs),
+              costounit: costo.costounit,
+              precioref: costo.precioref,
+              notas: texto(item?.notas) ?? null,
+            },
+          });
+        }
+
+        return documento;
       });
-      res.json({ ok: true, documento: resultado });
+
+      return res.json({ ok: true, documento: resultado });
     } catch (error: any) {
+      if (responderError(res, error, "POST /api/movimientos/devolucion-proveedor")) return;
       console.error("Error al devolver a proveedor:", error);
-      res.status(500).json({ message: "Error al procesar devolución", error: error.message });
+      return res.status(500).json({ message: "Error al procesar devolución" });
     }
-  });
+  }
+);
 
 
 // ================================

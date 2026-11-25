@@ -2,6 +2,7 @@ import { Router, Response } from "express";
 import prisma from "../../core/prisma";
 import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
 import productosService from "./productosService";
+import { stockResumenPorProducto, redondear } from "../../core/valuacion";
 
 const router = Router();
 
@@ -129,37 +130,19 @@ router.get("/productos-busqueda", async (req, res) => {
       }
     });
 
-    const productosConStock = await Promise.all(productosRaw.map(async (p) => {
-        const ingresos = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "INGRESO", estado: "APROBADO" } } });
-        const salidas = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "SALIDA", estado: "APROBADO" } } });
-        const ajustes = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "AJUSTE", estado: "APROBADO" } } });
-        const devIn = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } } });
-        const devOut = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } } });
+            const stock = await stockResumenPorProducto(prisma, productosRaw.map((p) => p.id));
 
-        const stockFisico = ((Number(ingresos._sum.cantidad) || 0) + (Number(devIn._sum.cantidad) || 0) + (Number(ajustes._sum.cantidad) || 0)) - ((Number(salidas._sum.cantidad) || 0) + (Number(devOut._sum.cantidad) || 0));
-
-        const comprometido = await prisma.solicitud_item.aggregate({
-            _sum: { cantidad: true },
-            where: {
-                productoid: p.id,
-                solicitud: {
-                    estado: { in: ["PENDIENTE", "APROBADA"] }
-                }
-            }
-        });
-
-        const cantComprometida = Number(comprometido._sum.cantidad) || 0;
-        const disponible = stockFisico - cantComprometida;
-
-        return {
-            id: p.id,
-            nombre: p.nombre,
-            codigo: p.codigo,
-            precioref: p.precioref,
-            unidad: p.unidad,
-            stockActual: disponible > 0 ? disponible : 0
-        };
-    }));
+    const productosConStock = productosRaw.map((p) => {
+      const disponible = redondear(stock[p.id]?.disponible ?? 0, 4);
+      return {
+        id: p.id,
+        nombre: p.nombre,
+        codigo: p.codigo,
+        precioref: p.precioref,
+        unidad: p.unidad,
+        stockActual: disponible > 0 ? disponible : 0,
+      };
+    });
     res.json(productosConStock);
   } catch (error) {
     console.error("Error buscando productos:", error);
@@ -177,30 +160,12 @@ router.get("/productos/buscar", async (req, res) => {
       take: 50
     });
 
-    const productosConStock = await Promise.all(productosRaw.map(async (p) => {
-        const ingresos = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "INGRESO", estado: "APROBADO" } } });
-        const salidas = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "SALIDA", estado: "APROBADO" } } });
-        const ajustes = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "AJUSTE", estado: "APROBADO" } } });
-        const devIn = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "DEVOLUCION", estado: "APROBADO", proveedorid: null } } });
-        const devOut = await prisma.documento_item.aggregate({ _sum: { cantidad: true }, where: { productoid: p.id, documento: { tipo: "DEVOLUCION", estado: "APROBADO", NOT: { proveedorid: null } } } });
+            const stock = await stockResumenPorProducto(prisma, productosRaw.map((p) => p.id));
 
-        const stockFisico = ((Number(ingresos._sum.cantidad) || 0) + (Number(devIn._sum.cantidad) || 0) + (Number(ajustes._sum.cantidad) || 0)) - ((Number(salidas._sum.cantidad) || 0) + (Number(devOut._sum.cantidad) || 0));
-
-        const comprometido = await prisma.solicitud_item.aggregate({
-            _sum: { cantidad: true },
-            where: {
-                productoid: p.id,
-                solicitud: {
-                    estado: { in: ["PENDIENTE", "APROBADA"] }
-                }
-            }
-        });
-
-        const cantComprometida = Number(comprometido._sum.cantidad) || 0;
-        const disponible = stockFisico - cantComprometida;
-
-        return { ...p, stockActual: disponible > 0 ? disponible : 0 };
-    }));
+    const productosConStock = productosRaw.map((p) => {
+      const disponible = redondear(stock[p.id]?.disponible ?? 0, 4);
+      return { ...p, stockActual: disponible > 0 ? disponible : 0 };
+    });
     res.json(productosConStock);
   } catch (error) {
     res.status(500).json({ error: "Error al buscar productos" });

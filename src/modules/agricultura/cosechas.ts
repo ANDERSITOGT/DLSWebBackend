@@ -5,6 +5,7 @@ import {
   cosechasService,
   CrearCosechaInput,
 } from "./cosechasService";
+import { parsearFechaNegocioOpcional } from "../../core/tiempo";
 
 const router = Router();
 
@@ -58,8 +59,9 @@ router.post("/", authenticateToken, soloCosechas, async (req: AuthRequest, res: 
       });
     }
 
-    const fechaCosecha = new Date(fecha);
-    if (Number.isNaN(fechaCosecha.getTime())) {
+        // Fecha de calendario en hora Guatemala (mediodía GT): no retrocede de día.
+    const fechaCosecha = parsearFechaNegocioOpcional(fecha as string | Date, false);
+    if (!fechaCosecha) {
       return res.status(400).json({ message: "La fecha no es válida." });
     }
 

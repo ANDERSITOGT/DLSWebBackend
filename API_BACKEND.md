@@ -279,7 +279,7 @@ para roles **`SOLICITANTE`, `VISOR` y `COSECHA`**. Solo `ADMIN` y `BODEGUERO` ve
 - Genera documento `SALIDA` (DESPACHO) o `DEVOLUCION` (DEVOLUCIÓN) en estado `APROBADO` y mueve inventario.
 - Valida stock al momento (solo DESPACHO) → **400** `STOCK_INSUFICIENTE`.
 - `solicitud.aprobadorid` **no** se sobrescribe: conserva a quien aprobó. Quien entrega queda en `documento.creadorid` y en auditoría.
-- Costeo congelado por línea: DESPACHO usa `producto.precioref` > 0 o, en su defecto, el último `costounit` de un INGRESO aprobado; DEVOLUCIÓN hereda el costo del documento de salida de origen (o cae a `precioref`).
+- Costeo congelado por línea: DESPACHO usa `producto.precioref` > 0 o, en su defecto, el último `costounit` de un INGRESO aprobado — si no hay ninguno responde **400 `PRODUCTO_SIN_COSTO`**. DEVOLUCIÓN hereda el costo del documento de salida de origen (o cae a `precioref`) y, al ser devolución interna, **recalcula el CPP** de los productos devueltos.
 
 Respuesta:
 ```ts
@@ -294,7 +294,7 @@ Respuesta:
 
 `SOLICITUD_NO_ENCONTRADA` (404), `SIN_PERMISO` (403), `ESTADO_INVALIDO` / `TIPO_INVALIDO` (400),
 `TRANSICION_INVALIDA` (400), `SOLICITUD_NO_APROBADA` (400), `SOLICITUD_YA_PROCESADA` (409),
-`SOLICITUD_SIN_ITEMS` (400), `STOCK_INSUFICIENTE` (400), `DEVOLUCION_DUPLICADA` (409),
+`SOLICITUD_SIN_ITEMS` (400), `STOCK_INSUFICIENTE` (400), `PRODUCTO_SIN_COSTO` (400), `DEVOLUCION_DUPLICADA` (409),
 `LOTE_NO_ASIGNADO` (400), `SOLICITANTE_REQUERIDO` (400).
 
 Notas del POST:
@@ -313,9 +313,9 @@ Notas del POST:
 | Método | Ruta | Auth / Rol | Body | Descripción | Respuesta |
 |---|---|---|---|---|---|
 | POST | `/escanear` | 🔒 ADMIN/BODEGUERO | `multipart/form-data` (ver §4.1) | OCR de factura (tesseract.js `spa+eng`). | `200 { ok, escaneo }` |
-| POST | `/ingreso` | 🔒 **ADMIN / BODEGUERO** | ver §4.2 | Ingreso de mercadería (actualiza `precioref` con el último costo válido). | `201 { ok, documento, message }` |
-| POST | `/ajuste` | 🔒 ADMIN/BODEGUERO | `{ productoId, cantidad, notas, tipo }` | Ajuste de inventario. | `{ ok, documento }` |
-| POST | `/devolucion-proveedor` | 🔒 ADMIN/BODEGUERO | `{ proveedorId, bodegaId, items: [{ productoId, cantidad, notas? }], notas }` | Devolución a proveedor. | `{ ok, documento }` |
+| POST | `/ingreso` | 🔒 **ADMIN / BODEGUERO** | ver §4.2 | Ingreso de mercadería (recalcula `producto.precioref` por **CPP**). | `201 { ok, documento, message }` |
+| POST | `/ajuste` | 🔒 ADMIN/BODEGUERO | `{ productoId, cantidad, tipo?, bodegaId?, loteId?, notas? }` | Ajuste **bidireccional**: `SALIDA`/`FALTANTE` resta (cantidad negativa) y `ENTRADA`/`SOBRANTE` suma. Congela `precioref`/`costounit` del producto. | `{ ok, documento }` |
+| POST | `/devolucion-proveedor` | 🔒 ADMIN/BODEGUERO | `{ proveedorId, bodegaId, items: [{ productoId, cantidad, notas? }], notas }` | Devolución a proveedor (congela `precioref`/`costounit`). | `{ ok, documento }` |
 | GET | `/` | 🔒 | `page`, `limit`, `tipo`, `estado`, `proveedorId`, `solicitanteId`, `bodegaId`, `q`, `fechaInicio`, `fechaFin` | Lista **paginada** de movimientos/documentos. | **envuelto** `{ data: [...], meta: { total, page, limit, totalPages } }` |
 | GET | `/export` | 🔒 | los mismos filtros que `/` | Exporta el listado (máx. 500 filas). | PDF |
 | GET | `/:id` | 🔒 | – | Detalle del movimiento (acepta `id` UUID o `consecutivo`). | objeto detalle |
@@ -370,10 +370,26 @@ productos: [{
 
 Las operaciones que **no** manejan costo unitario propio (SALIDA y DEVOLUCIÓN generadas desde
 `POST /api/solicitudes/:id/entregar`, `POST /api/movimientos/ajuste` y
-`POST /api/movimientos/devolucion-proveedor`) guardan como **snapshot** el `producto.precioref`
-vigente en `documento_item.precioref` (redondeado a 2 decimales). Si el `precioref` del producto es
-`null` o `0`, la columna queda en `null` (no se escribe un 0 engañoso). `documento_item.costounit`
-permanece en `null` en estas líneas.
+`POST /api/movimientos/devolucion-proveedor`) guardan el **costo congelado** del producto en
+`documento_item.costounit` **y** `documento_item.precioref`. La fuente es `producto.precioref`
+(CPP vigente, redondeado a 2 decimales); si el producto no tiene `precioref > 0` se responde
+**400 `PRODUCTO_SIN_COSTO`** (no se crea movimiento sin costo).
+
+**Valuación por Costo Promedio Ponderado (CPP)** — fuente única en `src/core/valuacion.ts`:
+
+```
+cppNuevo = ((stockPrevio * cppActual) + (cantidadEntrada * costounit))
+           / (stockPrevio + cantidadEntrada)
+```
+
+- `POST /api/movimientos/ingreso`: `cantidadEntrada`/`costounit` son el promedio ponderado de las
+  líneas con costo > 0; `stockPrevio` es el stock aprobado **antes** de insertar las líneas. Las
+  líneas con costo 0 (bonificación/muestra) no diluyen el promedio. Si ninguna línea trae costo,
+  `precioref` **no** se toca.
+- `entregar` de una DEVOLUCIÓN interna (sin proveedor): pondera la cantidad devuelta al
+  `costounit` heredado del documento de salida original.
+- DESPACHO: **bloquea** (400 `PRODUCTO_SIN_COSTO`) si el producto no tiene `precioref > 0` ni
+  costos históricos de ingreso.
 
 > 🔒 **`/export` y `/:id/export` ahora exigen token** (antes eran públicas).
 
@@ -590,22 +606,32 @@ Si llegan `proveedorId` **y** `factura` (no vacía):
       costoUnitario: number,
       unidad: string,                // id de la unidad (compatibilidad: antes también era el id)
       loteId: string | null,
-      preciorefActualizado: number   // producto.precioref tras este ingreso (último costo válido, 2 decimales)
+      preciorefActualizado: number   // producto.precioref (CPP) tras este ingreso, 2 decimales
     }]
   }
 }
 ```
 
-**Comportamiento de `precioref`**
+**Comportamiento de `precioref` — Costo Promedio Ponderado (CPP)**
 
-- Se actualiza **una sola vez por producto y por ingreso**, con el **último costo unitario válido**
-  (`costounit > 0`) ingresado en **esa** transacción. Si el mismo producto aparece en varias líneas,
-  gana la última línea con costo mayor a 0.
-- El valor se **redondea a 2 decimales** (`producto.precioref` es `Decimal(12, 2)`). Si el costo
-  excede la precisión de la columna, `precioref` **no** se actualiza y se conserva el vigente.
-- Si **todas** las líneas de un producto llegan con `costounit === 0` (o sin costo), `precioref`
-  **no** se sobrescribe con 0: se conserva el precio de referencia vigente. En ese caso
-  `items[].preciorefActualizado` devuelve el `precioref` que quedó vigente en el producto.
+- Por cada producto del ingreso se recalcula `producto.precioref` con:
+
+  ```
+  cppNuevo = ((stockPrevio * cppActual) + (cantidadIngreso * costounit))
+             / (stockPrevio + cantidadIngreso)
+  ```
+
+  donde `stockPrevio` es el stock físico aprobado **antes** de insertar las líneas y
+  `costounit` es el promedio ponderado de las líneas con costo > 0
+  (`Σ cantidad_i * costo_i / Σ cantidad_i`).
+- Si el mismo producto aparece en varias líneas, **todas** se ponderan en una sola pasada
+  (a diferencia de la regla anterior del "último costo válido").
+- Las líneas con costo `0`/omitido (bonificaciones, muestras) **no** diluyen el promedio.
+- Si `stockPrevio <= 0` o el `precioref` actual es `null`/`0`, se arranca con `cppNuevo = costounit`.
+- El resultado se redondea a 2 decimales (`Decimal(12, 2)`). Si excede la precisión de la columna,
+  se conserva el `precioref` vigente.
+- Si **todas** las líneas de un producto llegan con costo 0 (o sin costo), `precioref` **no** se
+  sobrescribe. En ese caso `items[].preciorefActualizado` devuelve el `precioref` vigente.
 - Ya **no** se calcula la **moda** de los últimos 10 ingresos aprobados (regla anterior, retirada).
 
 **Otros errores**

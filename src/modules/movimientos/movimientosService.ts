@@ -1,6 +1,23 @@
 import prisma from "../../core/prisma";
 import PDFDocument from "pdfkit";
 import { Prisma } from "@prisma/client";
+import {
+  aNumero as aNumeroValuacion,
+  calcularCpp,
+  normalizarCosto as normalizarCostoValuacion,
+  normalizarPrecioref as normalizarPreciorefValuacion,
+  redondear as redondearValuacion,
+  stockFisicoPorProducto,
+} from "../../core/valuacion";
+import {
+  MS_POR_DIA,
+  anioActualGT,
+  finDelDiaGT,
+  formatearFechaGT,
+  inicioDelDiaGT,
+  parsearFechaNegocio,
+  parsearFechaNegocioOpcional,
+} from "../../core/tiempo";
 
 // =============================
 // Error de negocio tipado
@@ -24,6 +41,16 @@ export class MovimientoError extends Error {
 // =============================
 // Helper para construir PDFs
 // =============================
+/**
+ * Formatea una fecha ISO (o `null`) a `DD/MM/AAAA` en hora Guatemala.
+ * Devuelve `"-"` cuando no hay fecha o no es parseable.
+ */
+function formatearFechaGTdeISO(fechaISO: string | null | undefined): string {
+  if (!fechaISO) return "-";
+  const fecha = parsearFechaNegocioOpcional(fechaISO, true);
+  return fecha ? formatearFechaGT(fecha) : "-";
+}
+
 async function buildPDF(build: (doc: any) => void): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", margin: 40 });
@@ -220,36 +247,11 @@ function textoOpcional(value: unknown): string | null {
   return limpio.length > 0 ? limpio : null;
 }
 
-/**
- * Convierte a número aceptando "1,5" (coma decimal) además de "1.5".
- *
- * Importante: Prisma devuelve las columnas `Decimal` como objetos
- * (`Prisma.Decimal`), no como `number`. Sin este caso, cualquier importe
- * leído de BD se interpretaría como `null`.
- */
-function aNumero(value: unknown): number | null {
-  if (value === undefined || value === null || value === "") return null;
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string") {
-    const limpio = value.trim().replace(",", ".");
-    if (limpio === "") return null;
-    const n = Number(limpio);
-    return Number.isFinite(n) ? n : null;
-  }
-  // Prisma.Decimal y cualquier objeto con `toNumber()`/`toFixed()`
-  if (typeof value === "object") {
-    const obj = value as { toNumber?: () => number; toString?: () => string };
-    if (typeof obj.toNumber === "function") {
-      const n = obj.toNumber();
-      return Number.isFinite(n) ? n : null;
-    }
-    if (typeof obj.toString === "function") {
-      const n = Number(obj.toString());
-      return Number.isFinite(n) ? n : null;
-    }
-  }
-  return null;
-}
+/** Alias del helper compartido (ver `src/core/valuacion.ts`). */
+const aNumero = aNumeroValuacion;
+
+/** Redondea a 2 decimales (alias del helper compartido). */
+const redondear2 = redondearValuacion;
 
 /**
  * Error genérico de validación (siempre 400) con código para que el
@@ -259,82 +261,46 @@ function errorValidacion(message: string, codigo: string): MovimientoError {
   return new MovimientoError(message, 400, codigo);
 }
 
-/** Decimales soportados por `producto.precioref` (columna `Decimal(12, 2)`). */
-const PRECIOREF_DECIMALES = 2;
-/** Dígitos enteros máximos soportados por `producto.precioref`. */
-const PRECIOREF_MAX_ENTERO = 10 ** (12 - PRECIOREF_DECIMALES);
-
-/**
- * Normaliza un importe al formato de `producto.precioref` (`Decimal(12, 2)`).
- *
- * Redondea a 2 decimales. Devuelve `null` cuando el valor no es válido o no
- * cabe en la precisión de la columna, para no romper el `UPDATE`.
- */
-function normalizarPrecioref(valor: number): number | null {
-  if (!Number.isFinite(valor) || valor < 0) return null;
-  const redondeado = redondear2(valor);
-  if (redondeado >= PRECIOREF_MAX_ENTERO) return null;
-  return redondeado;
-}
-
 // ---------------------------------------------------------------------
-// ÚLTIMO COSTO VÁLIDO (precio de referencia)
+// COSTO PROMEDIO PONDERADO (CPP)
 // ---------------------------------------------------------------------
 /**
- * Devuelve el **último costo unitario válido** de un producto dentro de las
- * líneas del ingreso, es decir, el `costounit` de la última línea (en el
- * orden en que llegaron) que sea `> 0`.
+ * Costo unitario representativo de las líneas de un producto dentro de un
+ * ingreso: **promedio ponderado** de las líneas que llegan con `costounit > 0`
+ * (`Σ cantidad_i * costo_i / Σ cantidad_i`).
  *
- * Devuelve `null` si ninguna línea del producto trae un costo mayor a 0, en
- * cuyo caso `producto.precioref` **no debe** sobrescribirse con 0: se conserva
- * el precio de referencia vigente.
+ * Se ignoran las líneas con costo 0 / omitido (bonificaciones, muestras) para
+ * que no diluyan el costo de compra. Devuelve `null` cuando **ninguna** línea
+ * trae costo válido: en ese caso `producto.precioref` no debe tocarse.
  */
-function ultimoCostoValido(
-  lineas: { productoId: string; costo: number; costoOmitido: boolean }[],
+function costoPonderadoIngreso(
+  lineas: { productoId: string; cantidad: number; costo: number; costoOmitido: boolean }[],
   productoId: string
-): number | null {
-  let ultimo: number | null = null;
+): { costoPonderado: number | null; cantidadConCosto: number } {
+  let valor = 0;
+  let cantidad = 0;
 
   for (const linea of lineas) {
     if (linea.productoId !== productoId) continue;
     if (linea.costoOmitido) continue;
     if (!Number.isFinite(linea.costo) || linea.costo <= 0) continue;
-    ultimo = linea.costo;
+    if (!Number.isFinite(linea.cantidad) || linea.cantidad <= 0) continue;
+    valor += linea.cantidad * linea.costo;
+    cantidad += linea.cantidad;
   }
 
-  return ultimo;
+  if (cantidad <= 0) return { costoPonderado: null, cantidadConCosto: 0 };
+  return {
+    costoPonderado: normalizarCostoValuacion(valor / cantidad),
+    cantidadConCosto: cantidad,
+  };
 }
 
 // ---------------------------------------------------------------------
-// ZONA HORARIA: America/Guatemala (UTC-6 todo el año, sin horario de verano)
+// ZONA HORARIA: delegada en `src/core/tiempo.ts` (America/Guatemala, UTC-6)
 // ---------------------------------------------------------------------
-const OFFSET_GUATEMALA_MS = 6 * 60 * 60 * 1000;
-const MS_POR_DIA = 24 * 60 * 60 * 1000;
-
 /** Formato de fecha "solo día" aceptado en query string. */
 const SOLO_FECHA_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-
-/** Redondea a 2 decimales evitando artefactos de punto flotante. */
-function redondear2(n: number): number {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
-}
-
-/** Verifica que `YYYY-MM-DD` exista realmente (rechaza 2026-02-31). */
-function esFechaCalendarioValida(fecha: string): boolean {
-  const [anio, mes, dia] = fecha.split("-").map(Number);
-  const d = new Date(Date.UTC(anio, mes - 1, dia));
-  return (
-    d.getUTCFullYear() === anio &&
-    d.getUTCMonth() === mes - 1 &&
-    d.getUTCDate() === dia
-  );
-}
-
-/** Instante UTC de las 00:00:00.000 locales de Guatemala para `YYYY-MM-DD`. */
-function inicioDelDiaGuatemala(fecha: string): Date {
-  const utcMedianoche = Date.parse(`${fecha}T00:00:00.000Z`);
-  return new Date(utcMedianoche + OFFSET_GUATEMALA_MS);
-}
 
 export type RangoFechasNormalizado = {
   fechaInicio?: Date;
@@ -367,10 +333,13 @@ export function normalizarRangoFechas(
 
   if (inicioStr) {
     if (SOLO_FECHA_REGEX.test(inicioStr)) {
-      if (!esFechaCalendarioValida(inicioStr)) {
+      // `parsearFechaNegocioOpcional` valida el calendario y devuelve `null`
+      // si `YYYY-MM-DD` no existe (p. ej. 2026-02-31).
+      const soloDia = parsearFechaNegocioOpcional(inicioStr, false);
+      if (!soloDia) {
         throw errorValidacion("'fechaInicio' no es una fecha válida.", "FECHA_INICIO_INVALIDA");
       }
-      fechaInicio = inicioDelDiaGuatemala(inicioStr);
+      fechaInicio = inicioDelDiaGT(inicioStr);
     } else {
       const d = new Date(inicioStr);
       if (Number.isNaN(d.getTime())) {
@@ -382,12 +351,12 @@ export function normalizarRangoFechas(
 
   if (finStr) {
     if (SOLO_FECHA_REGEX.test(finStr)) {
-      if (!esFechaCalendarioValida(finStr)) {
+      const soloDia = parsearFechaNegocioOpcional(finStr, false);
+      if (!soloDia) {
         throw errorValidacion("'fechaFin' no es una fecha válida.", "FECHA_FIN_INVALIDA");
       }
-      const inicioDelDia = inicioDelDiaGuatemala(finStr);
-      finExclusivo = new Date(inicioDelDia.getTime() + MS_POR_DIA);
-      fechaFin = new Date(finExclusivo.getTime() - 1);
+      finExclusivo = new Date(inicioDelDiaGT(finStr).getTime() + MS_POR_DIA);
+      fechaFin = finDelDiaGT(finStr);
     } else {
       const d = new Date(finStr);
       if (Number.isNaN(d.getTime())) {
@@ -636,12 +605,21 @@ export const movimientosService = {
    *  - Si viene `loteId`, el lote debe existir.
    *  - Si viene `proveedorId`, el proveedor debe existir.
    *  - Si hay `proveedorId` + `factura`, no puede repetirse el comprobante
-   *    `(proveedorid, numero, serie)` — con `serie` nula se compara solo
+      *    `(proveedorid, numero, serie)` — con `serie` nula se compara solo
    *    `(proveedorid, numero)`.
-   *  - Actualiza `producto.precioref` con el **último costo unitario válido**
-   *    (`costounit > 0`) del producto dentro de esta transacción, redondeado a
-   *    2 decimales. Si todas las líneas llegan con costo 0 (o sin costo), el
-   *    `precioref` vigente **no** se sobrescribe.
+   *  - **Valuación por Costo Promedio Ponderado (CPP).** Para cada producto
+   *    del ingreso se recalcula `producto.precioref` con:
+   *
+   *      cppNuevo = ((stockPrevio * cppActual) + (cantidadIngreso * costounit))
+   *                 / (stockPrevio + cantidadIngreso)
+   *
+   *    donde `stockPrevio` es el stock físico aprobado **antes** de insertar
+   *    las nuevas líneas y `costounit` es el costo ponderado de las líneas
+   *    con costo válido (`Σ cant*costo / Σ cant`). Si `stockPrevio <= 0` o el
+   *    `precioref` actual es `null`/`0`, se arranca con `cppNuevo = costounit`.
+   *    El resultado se redondea a 2 decimales (`Decimal(12,2)`).
+   *  - Si **todas** las líneas de un producto llegan con costo 0 (o sin
+   *    costo), el `precioref` vigente **no** se sobrescribe (no se diluye).
    *
    * Lanza `MovimientoError` (400/404/409) para errores de negocio.
    */
@@ -778,7 +756,7 @@ export const movimientosService = {
     // ---------- 4. Escritura transaccional ----------
     const documento = await prisma.$transaction(
       async (tx) => {
-        const anioActual = new Date().getFullYear();
+        const anioActual = anioActualGT();
         let nuevoCorrelativo = 1;
 
         const contador = await tx.consecutivo.findUnique({
@@ -798,9 +776,10 @@ export const movimientosService = {
           nuevoCorrelativo = 1;
         }
 
-        const codigoGenerado = `ING-${anioActual}-${nuevoCorrelativo.toString().padStart(4, "0")}`;
-        const fechaDocumento = input.fecha ? new Date(input.fecha) : new Date();
-        const fechaValida = Number.isNaN(fechaDocumento.getTime()) ? new Date() : fechaDocumento;
+                const codigoGenerado = `ING-${anioActual}-${nuevoCorrelativo.toString().padStart(4, "0")}`;
+        // Fecha en hora Guatemala: una fecha solo-día (`YYYY-MM-DD`) conserva
+        // la hora actual de GT para no retroceder de día.
+        const fechaValida = parsearFechaNegocio(input.fecha, true);
 
         const docCreado = await tx.documento.create({
           data: {
@@ -833,10 +812,43 @@ export const movimientosService = {
           comprobante = cf;
         }
 
-        const resultadoLineas: IngresoLineaResultadoDTO[] = [];
+                const resultadoLineas: IngresoLineaResultadoDTO[] = [];
 
-        // Productos presentes en el ingreso (se resuelve `precioref` una sola vez por producto)
+        // Productos presentes en el ingreso (se resuelve el CPP una sola vez por producto)
         const productoIdsIngreso = [...new Set(lineas.map((l) => l.productoId))];
+
+        // ---------------------------------------------------------------
+        // Valuación: CPP ANTES de insertar las nuevas líneas.
+        // Se lee el stock físico previo y el `precioref` vigente (CPP actual).
+        // ---------------------------------------------------------------
+        const [stockPrevioPorProducto, productosActuales] = await Promise.all([
+          stockFisicoPorProducto(tx, productoIdsIngreso, { stockPrevioA: fechaValida }),
+          tx.producto.findMany({
+            where: { id: { in: productoIdsIngreso } },
+            select: { id: true, precioref: true },
+          }),
+        ]);
+        const cppActualPorProducto = new Map(
+          productosActuales.map((p) => [p.id, aNumero(p.precioref)])
+        );
+
+                const cppPorProducto = new Map<string, number | null>();
+        for (const productoId of productoIdsIngreso) {
+          const { costoPonderado, cantidadConCosto } = costoPonderadoIngreso(lineas, productoId);
+          if (costoPonderado === null) {
+            // Ninguna línea con costo válido: no se diluye ni se sobrescribe.
+            cppPorProducto.set(productoId, null);
+            continue;
+          }
+
+          const { cppNuevo } = calcularCpp({
+            stockPrevio: stockPrevioPorProducto[productoId] ?? 0,
+            cppActual: cppActualPorProducto.get(productoId) ?? null,
+            cantidadIngreso: cantidadConCosto,
+            costounit: costoPonderado,
+          });
+          cppPorProducto.set(productoId, cppNuevo);
+        }
 
         for (const linea of lineas) {
           const producto = productosMap.get(linea.productoId)!;
@@ -847,6 +859,12 @@ export const movimientosService = {
               productoid: linea.productoId,
               cantidad: new Prisma.Decimal(linea.cantidad),
               costounit: new Prisma.Decimal(linea.costo),
+              // Snapshot del CPP vigente tras valorar este ingreso.
+              precioref:
+                cppPorProducto.get(linea.productoId) === null ||
+                cppPorProducto.get(linea.productoId) === undefined
+                  ? null
+                  : new Prisma.Decimal(cppPorProducto.get(linea.productoId)!),
               unidadid: producto.unidadid,
               loteid: linea.loteId,
             },
@@ -863,34 +881,31 @@ export const movimientosService = {
           });
         }
 
-        // Actualizar `producto.precioref` con el último costo unitario válido
-        // de esta transacción. Si todas las líneas del producto vienen con
-        // costo 0 / omitido, se conserva el `precioref` vigente (no se pisa con 0).
+        // Persistir el CPP en `producto.precioref` (`Decimal(12,2)`).
         for (const productoId of productoIdsIngreso) {
-          const costoValido = ultimoCostoValido(lineas, productoId);
-          const nuevoPrecioRef = costoValido === null ? null : normalizarPrecioref(costoValido);
-
+          const cppNuevo = cppPorProducto.get(productoId);
           let preciorefResultante: number;
 
-          if (nuevoPrecioRef === null) {
-            // Sin costo válido (o fuera del rango de Decimal(12,2)): no se toca el
-            // producto; se devuelve el precio de referencia que queda vigente.
-            if (costoValido !== null) {
-              console.warn(
-                `[registrarIngreso] Costo ${costoValido} fuera de rango para producto.precioref (producto ${productoId}); no se actualiza.`
-              );
-            }
-            const actual = await tx.producto.findUnique({
-              where: { id: productoId },
-              select: { precioref: true },
-            });
-            preciorefResultante = normalizarPrecioref(aNumero(actual?.precioref) ?? 0) ?? 0;
+          if (cppNuevo === null || cppNuevo === undefined) {
+            // Sin costo válido: se conserva el precio de referencia vigente.
+            preciorefResultante =
+              normalizarPreciorefValuacion(cppActualPorProducto.get(productoId) ?? 0) ?? 0;
           } else {
-            await tx.producto.update({
-              where: { id: productoId },
-              data: { precioref: new Prisma.Decimal(nuevoPrecioRef) },
-            });
-            preciorefResultante = nuevoPrecioRef;
+            const valorDecimal = normalizarPreciorefValuacion(cppNuevo);
+            if (valorDecimal === null) {
+              // Fuera del rango de Decimal(12,2): no se actualiza.
+              console.warn(
+                `[registrarIngreso] CPP ${cppNuevo} fuera de rango para producto.precioref (producto ${productoId}); no se actualiza.`
+              );
+              preciorefResultante =
+                normalizarPreciorefValuacion(cppActualPorProducto.get(productoId) ?? 0) ?? 0;
+            } else {
+              await tx.producto.update({
+                where: { id: productoId },
+                data: { precioref: new Prisma.Decimal(valorDecimal) },
+              });
+              preciorefResultante = valorDecimal;
+            }
           }
 
           for (const r of resultadoLineas) {
@@ -1131,8 +1146,8 @@ export const movimientosService = {
         doc.font("Helvetica").text(`Tipo: ${m.tipo}   Estado: ${m.estado}`);
         doc.text(`Origen: ${m.origen ?? "-"}   Destino: ${m.destino ?? "-"}`);
         doc.text(`Proveedor: ${m.proveedor?.nombre ?? "-"}`);
-        doc.text(`Productos: ${m.resumenProductos.join(", ") || m.productos}`);
-        doc.text(`Fecha: ${m.fecha ?? "-"}`);
+                doc.text(`Productos: ${m.resumenProductos.join(", ") || m.productos}`);
+        doc.text(`Fecha: ${formatearFechaGTdeISO(m.fecha)}`);
         if (verCostos) {
           doc.text(`Monto: ${m.montoTotal === null ? "-" : m.montoTotal.toFixed(2)}`);
         }
@@ -1153,8 +1168,8 @@ export const movimientosService = {
       doc.moveDown();
       doc.fontSize(10);
             doc.text(`Tipo: ${det.tipo}`);
-      doc.text(`Estado: ${det.estado}`);
-      doc.text(`Fecha: ${det.fecha ?? "-"}`);
+            doc.text(`Estado: ${det.estado}`);
+      doc.text(`Fecha: ${formatearFechaGTdeISO(det.fecha)}`);
       doc.text(`Origen: ${det.origen ?? "-"}   Destino: ${det.destino ?? "-"}`);
       doc.text(`Proveedor: ${det.proveedor?.nombre ?? "-"}`);
       doc.moveDown();

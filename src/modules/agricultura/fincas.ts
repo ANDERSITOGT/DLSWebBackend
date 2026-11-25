@@ -1,6 +1,7 @@
 import { Router, Response } from "express";
 import prisma from "../../core/prisma";
 import { authenticateToken, AuthRequest } from "../../core/middlewares/auth";
+import { parsearFechaNegocio, parsearFechaNegocioOpcional } from "../../core/tiempo";
 
 const router = Router();
 
@@ -115,8 +116,9 @@ router.post("/:id/lotes", authenticateToken, async (req: AuthRequest, res: Respo
         areametroslineales: areametroslineales ? Number(areametroslineales) : 0,
         areamanzanas: areamanzanas ? Number(areamanzanas) : 0,
         areahectareas: areahectareas ? Number(areahectareas) : 0,
-        estado: estado || 'ABIERTO',
-        fechasiembra: new Date()
+                estado: estado || 'ABIERTO',
+        // Fecha de siembra: día de calendario, fijado a mediodía GT.
+        fechasiembra: parsearFechaNegocio(undefined, false)
       }
     });
     res.json(nuevo);
@@ -151,11 +153,16 @@ router.patch("/lotes/:loteId", authenticateToken, async (req: AuthRequest, res: 
     if (data.estado !== undefined) updateData.estado = data.estado;
     if (data.descripcion !== undefined) updateData.descripcion = data.descripcion;
 
-    if (data.fechasiembra !== undefined) {
-        updateData.fechasiembra = data.fechasiembra ? new Date(data.fechasiembra) : null;
+        if (data.fechasiembra !== undefined) {
+        // Fecha de calendario: mediodía GT para no retroceder de día.
+        updateData.fechasiembra = data.fechasiembra
+          ? parsearFechaNegocioOpcional(data.fechasiembra, false)
+          : null;
     }
     if (data.fechacierre !== undefined) {
-        updateData.fechacierre = data.fechacierre ? new Date(data.fechacierre) : null;
+        updateData.fechacierre = data.fechacierre
+          ? parsearFechaNegocioOpcional(data.fechacierre, false)
+          : null;
     }
 
     const actualizado = await prisma.lote.update({
